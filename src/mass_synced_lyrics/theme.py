@@ -185,3 +185,70 @@ def _hover(b: tk.Button, inside: bool) -> None:
 def paned(parent, orient="horizontal") -> tk.PanedWindow:
     w = tk.PanedWindow(parent, orient=orient, sashwidth=8, opaqueresize=True, sashpad=0, showhandle=False)
     return register(w, "paned")
+
+
+# ------------------------------------------------------------------ hover hints
+class _Hint:
+    """Small delayed tooltip shown under a widget while the pointer rests on it."""
+
+    def __init__(self, widget: tk.Misc, text, delay: int = 450):
+        self.widget, self.text, self.delay = widget, text, delay
+        self._after = None
+        self.tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None) -> None:
+        self._cancel()
+        self._after = self.widget.after(self.delay, self._show)
+
+    def _cancel(self) -> None:
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+
+    def _show(self) -> None:
+        self._after = None
+        text = self.text() if callable(self.text) else self.text
+        if not text:
+            return
+        p = palette()
+        try:
+            self.tip = tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            try:
+                self.tip.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            tk.Label(self.tip, text=text, justify="left", background=p["surface"], foreground=p["fg"],
+                     relief="solid", borderwidth=1, padx=10, pady=6, wraplength=380,
+                     font=font("body")).pack()
+            self.tip.update_idletasks()
+            x = self.widget.winfo_rootx()
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            sw = self.widget.winfo_screenwidth()
+            x = max(0, min(x, sw - self.tip.winfo_reqwidth() - 4))
+            if y + self.tip.winfo_reqheight() > self.widget.winfo_screenheight():
+                y = self.widget.winfo_rooty() - self.tip.winfo_reqheight() - 6
+            self.tip.wm_geometry(f"+{x}+{y}")
+        except tk.TclError:
+            self.tip = None
+
+    def _hide(self, _e=None) -> None:
+        self._cancel()
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
+
+
+def hint(widget: tk.Misc, text) -> tk.Misc:
+    """Attach a hover hint (text or a function returning text) and return the widget."""
+    widget._hint = _Hint(widget, text)
+    return widget

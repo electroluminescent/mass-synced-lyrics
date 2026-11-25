@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.1
+- Volume slider is logarithmic (decibel scale, 40 dB range): 100 % = full, 50 % ≈ −20 dB, 0 % = mute,
+  so most of the slider covers the quieter, more useful range.
+- Click the volume % to type a level (Enter or click away to set, Esc to cancel); mouse wheel over
+  the slider nudges it by 2 %.
+- Overview waveform: a plain click now jumps there (drag scrubs). **Ctrl+click** adds a checkpoint,
+  or removes the one under the pointer; right-click on a checkpoint still deletes it.
+- Hover hints on every button, switch and field (and on the song-list column headers and colour
+  legend); explanatory text and the ⓘ line were removed from the screen.
+- Faster waveform: the scrolling waveform is rendered once into image tiles and the lyric lanes are
+  built once; each frame only scrolls the view (about 12× less work per frame). The overview
+  waveform is a single image.
+
 ## 1.1.0
 - Modern interface: Sun Valley theme (Windows 11 style) with a header, card layout, accent buttons,
   switches, flat green ✓ choice buttons and restyled lists and lyric panes. **Dark mode** switch in the

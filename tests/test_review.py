@@ -258,3 +258,12 @@ def test_session_roundtrip(tmp_path):
     d = load_session(p)
     assert d["rows"] == rows and d["selected"] == "/m/a.flac" and d["search"] == "x"
     assert load_session(str(tmp_path / "missing.json")) is None
+
+
+def test_volume_curve_is_logarithmic():
+    from mass_synced_lyrics.player import volume_gain
+    assert volume_gain(0) == 0 and volume_gain(100) == pytest.approx(1.0)
+    assert volume_gain(50) == pytest.approx(0.1)           # -20 dB: quieter for most of the slider
+    assert volume_gain(75) == pytest.approx(10 ** (-10 / 20))
+    assert volume_gain(25) < volume_gain(50) < volume_gain(75)
+    assert volume_gain(-5) == 0 and volume_gain(500) == pytest.approx(1.0)

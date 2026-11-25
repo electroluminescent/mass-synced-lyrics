@@ -68,6 +68,18 @@ def envelope(peaks: np.ndarray, start_s: float, end_s: float, width: int) -> np.
     return out
 
 
+VOLUME_RANGE_DB = 40.0
+
+
+def volume_gain(level: float) -> float:
+    """Slider level 0–100 → amplitude gain on a decibel (logarithmic) scale:
+    100 = 0 dB, 50 = −20 dB, 25 = −30 dB … 0 = silent."""
+    level = max(0.0, min(100.0, float(level)))
+    if level <= 0:
+        return 0.0
+    return 10 ** (-VOLUME_RANGE_DB * (1 - level / 100.0) / 20.0)
+
+
 class Player:
     """Plays decoded audio; falls back to a silent clock when no output device exists."""
 

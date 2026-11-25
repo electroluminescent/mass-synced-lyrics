@@ -2,7 +2,7 @@
 
 Walks a music folder and adds **time-synced (LRC) lyrics** to each song. It has a desktop interface with a review player, plus a command line.
 
-The interface is a modern light/dark theme; switch with **Dark mode** in the header.
+The interface is a modern light/dark theme; switch with **Dark mode** in the header. Hover over any button, switch or field for a short explanation.
 
 The app works in three steps:
 
@@ -62,14 +62,15 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 
 - **Overview waveform** of the whole song, with lyric lanes for the **current** (gold) and **new** (green) lyrics. Each bar spans the time its line is shown. Word timings appear as divisions inside a bar, and the playing line lights up.
 - **Scrolling waveform** that moves past a fixed red playhead (8 s view), with line text, progress through the line, and the current word.
-- **Drag either waveform to scrub.** Seeks and scrubbing glide with a 0.2 s ease.
+- Seeks and scrubbing glide with a 0.2 s ease.
 - **Hovering** over a waveform shows the current and new lyric at that point.
+- **Click a waveform to jump there; drag it to scrub.**
 - **Checkpoints:**
-  - Click the overview to add one. Right-click its ▶ button, or right-click / Ctrl+click near it on the overview, to delete it. Shift+click jumps to that point.
+  - **Ctrl+click** the overview to add one; **Ctrl+click** on an existing one removes it. Right-click a checkpoint or its ▶ button also deletes it.
   - Keys **1–9** play checkpoint N; **0** plays the next one.
   - Each plays ± the checkpoint length (default 1.0 s), then stops, or repeats if *Loop* is ticked.
   - Defaults are the first and last lyric line. Your own checkpoints are saved per song; *Reset points* restores the defaults.
-- **Volume slider** next to the play button. **Space** plays and pauses. Number keys and Space work unless you are typing in an editable box.
+- **Volume slider** next to the play button, on a logarithmic (decibel) scale so most of its travel covers the quieter range. Click the **%** to type a level, or use the mouse wheel over the slider. **Space** plays and pauses. Number keys and Space work unless you are typing in an editable box.
 
 **Lyrics panes:** current lyrics on the left, a choice of new lyrics on the right: what Find found, sidecars, collection matches, LRCLIB (cached or *Search LRCLIB*), the current lyrics (to re-time them), the original lyrics, or *No lyrics*. The panes scroll together, keep the playing line centred, and animate smoothly. Click a line to jump to it.
 

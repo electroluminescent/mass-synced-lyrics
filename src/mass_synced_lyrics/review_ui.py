@@ -15,7 +15,7 @@ from . import review
 from .config import save_settings
 from .engine import STATUS_LABELS, display_path
 from .paths import state_key
-from .player import Player, decode, envelope
+from .player import Player, decode, envelope, volume_gain
 from .state import KEEP, State
 
 FILTERS = {
@@ -49,6 +49,30 @@ CHOICE_TEXT = {"local": "Local", "online": "Online", "keep": "Don't change", "cu
                "remove": "Remove lyrics", "": ""}
 DONE_STATUSES = {"embedded", "lrc_written", "already_embedded", "unchanged"}
 PROBLEM_STATUSES = {"error", "ambiguous", "unsupported", "rejected"}
+
+
+LEGEND_HINTS = {
+    "c_local": "Apply will use local lyrics: a sidecar .lrc, your collection, or embedded lyrics (.lrc mode).",
+    "c_online": "Apply will use lyrics found online (LRCLIB).",
+    "c_custom": "Apply will use lyrics you chose or re-timed in the player.",
+    "c_keep": "Nothing will be written for this song.",
+    "c_done": "Already written (or already had these lyrics).",
+    "c_problem": "Needs a look: error, ambiguous .lrc match, or unsupported file.",
+}
+COLUMN_HINTS = {
+    "#0": "Artist ▸ Album ▸ song. Ctrl/Shift+click selects several songs; an artist or album row counts as all "
+          "its songs. Right-click for Save now, sources, Reset and Restore original.",
+    "#1": "What happened to the song so far.",
+    "#2": "Lyrics found locally: a sidecar .lrc beside the song, your collection, or embedded lyrics.",
+    "#3": "Result of the LRCLIB lookup: found, plain lyrics only, instrumental, or not found.",
+    "#4": "What Apply will do. Click a Choice cell to cycle Local → Online → Don't change. On an artist/album "
+          "row or a multi-selection it changes all of them.",
+}
+
+
+def _hex_rgb(color: str) -> tuple[int, int, int]:
+    color = color.lstrip("#")
+    return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
 
 
 def ease_out(p: float) -> float:
@@ -158,22 +182,19 @@ class ReviewTab(ttk.Frame):
         top = ttk.Frame(left)
         top.pack(fill="x")
         self.v_filter = tk.StringVar(value="All")
-        cmb = ttk.Combobox(top, textvariable=self.v_filter, values=list(FILTERS), state="readonly", width=16)
+        cmb = theme.hint(ttk.Combobox(top, textvariable=self.v_filter, values=list(FILTERS), state="readonly", width=16), 'Show only some songs: needing a look, found, changed, your choices…')
         cmb.pack(side="left")
         cmb.bind("<<ComboboxSelected>>", lambda e: self._refill())
         self.v_search = tk.StringVar()
-        ent = ttk.Entry(top, textvariable=self.v_search)
+        ent = theme.hint(ttk.Entry(top, textvariable=self.v_search), 'Search by artist, album, title or path.')
         ent.pack(side="left", fill="x", expand=True, padx=(6, 0))
         self.v_search.trace_add("write", lambda *a: self._refill())
         legend = ttk.Frame(left)
         legend.pack(fill="x", pady=(4, 0))
         for tag, text in (("c_local", "Local"), ("c_online", "Online"), ("c_custom", "Custom"),
                           ("c_keep", "Don't change"), ("c_done", "Written"), ("c_problem", "Check")):
-            theme.register(tk.Label(legend, text=text), "pill", tag=tag).pack(side="left", padx=(0, 4))
-        ttk.Label(left, style="Caption.TLabel",
-                  text="Click a Choice cell to switch between the lyrics found and Don't change (on an "
-                       "artist/album row or a multi-selection: all of them). Ctrl/Shift+click selects several; "
-                       "right-click for Save now, sources and Restore.", wraplength=520).pack(fill="x")
+            pill = theme.register(tk.Label(legend, text=text), "pill", tag=tag)
+            theme.hint(pill, LEGEND_HINTS[tag]).pack(side="left", padx=(0, 4))
         tf = ttk.Frame(left)
         tf.pack(fill="both", expand=True, pady=4)
         cols = ("status", "local", "online", "choice")
@@ -187,6 +208,9 @@ class ReviewTab(ttk.Frame):
         theme.register(self, "callback", fn=self._restyle)
         self.tree.bind("<Button-1>", self._tree_click, add="+")
         self.tree.bind("<Button-3>", self._tree_menu)
+        self._head_tip = Tooltip(self.tree)
+        self.tree.bind("<Motion>", self._tree_motion, add="+")
+        self.tree.bind("<Leave>", lambda e: self._head_tip.hide(), add="+")
         if sys.platform == "darwin":
             self.tree.bind("<Button-2>", self._tree_menu)
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
@@ -196,8 +220,8 @@ class ReviewTab(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         bf = ttk.Frame(left)
         bf.pack(fill="x")
-        ttk.Button(bf, text="Load earlier results", command=self.load_earlier).pack(side="left")
-        ttk.Button(bf, text="Open file…", command=self._open_file).pack(side="left", padx=6)
+        theme.hint(ttk.Button(bf, text="Load earlier results", command=self.load_earlier), 'Add every song from earlier runs to the list.').pack(side="left")
+        theme.hint(ttk.Button(bf, text="Open file…", command=self._open_file), 'Open any song in the player.').pack(side="left", padx=6)
         self.v_count = tk.StringVar(value="0 files")
         ttk.Label(bf, textvariable=self.v_count).pack(side="right")
 
@@ -215,26 +239,30 @@ class ReviewTab(ttk.Frame):
 
         tr = ttk.Frame(right)
         tr.grid(row=r, column=0, sticky="ew", pady=(4, 2)); r += 1
-        self.btn_play = ttk.Button(tr, text="▶ Play", width=9, command=self._toggle_play,
-                                   style="Accent.TButton" if theme._state["sv"] else "TButton")
+        self.btn_play = theme.hint(ttk.Button(tr, text="▶ Play", width=9, command=self._toggle_play,
+                                   style="Accent.TButton" if theme._state["sv"] else "TButton"), 'Play / pause (Space).\nSpace: play / pause · keys 1–9: play checkpoint N · 0: next checkpoint\nClick a waveform to jump, drag it to scrub · Ctrl+click the overview to add or remove a checkpoint')
         self.btn_play.pack(side="left")
-        ttk.Button(tr, text="−5s", width=4, command=lambda: self._nudge(-5)).pack(side="left", padx=(4, 0))
-        ttk.Button(tr, text="+5s", width=4, command=lambda: self._nudge(5)).pack(side="left", padx=(2, 8))
+        theme.hint(ttk.Button(tr, text="−5s", width=4, command=lambda: self._nudge(-5)), 'Back 5 seconds.').pack(side="left", padx=(4, 0))
+        theme.hint(ttk.Button(tr, text="+5s", width=4, command=lambda: self._nudge(5)), 'Forward 5 seconds.').pack(side="left", padx=(2, 8))
         self.v_time = tk.StringVar(value="0:00.0 / 0:00.0")
         ttk.Label(tr, textvariable=self.v_time, width=17).pack(side="left")
         ttk.Label(tr, text="🔊" if os.name == "nt" else "Vol").pack(side="left", padx=(6, 2))
         self.v_volume = tk.DoubleVar(value=float(self.app.settings.playback_volume))
-        self.sld_volume = ttk.Scale(tr, from_=0, to=100, orient="horizontal", length=110,
-                                    variable=self.v_volume, command=self._volume_changed)
+        self.sld_volume = theme.hint(ttk.Scale(tr, from_=0, to=100, orient="horizontal", length=110,
+                                    variable=self.v_volume, command=self._volume_changed), 'Playback volume (logarithmic). Mouse wheel: ±2 %.')
         self.sld_volume.pack(side="left")
         self.v_volume_txt = tk.StringVar(value=f"{int(self.v_volume.get())}%")
-        ttk.Label(tr, textvariable=self.v_volume_txt, width=5).pack(side="left")
+        self.lbl_volume = ttk.Label(tr, textvariable=self.v_volume_txt, width=5, cursor="xterm")
+        self.lbl_volume.pack(side="left", padx=(4, 0))
+        self.lbl_volume.bind("<Button-1>", lambda e: self._edit_volume())
         self.sld_volume.bind("<ButtonRelease-1>", lambda e: self._save_globals())
-        self.player.volume = self.v_volume.get() / 100.0
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.sld_volume.bind(seq, self._volume_wheel)
+        self.player.volume = volume_gain(self.v_volume.get())
         self.v_audio_note = tk.StringVar()
         ttk.Label(right, textvariable=self.v_audio_note, style="Caption.TLabel").grid(row=r, column=0, sticky="w"); r += 1
 
-        self.ov = tk.Canvas(right, height=78, background=BG, highlightthickness=0, cursor="crosshair")
+        self.ov = tk.Canvas(right, height=78, background=BG, highlightthickness=0, cursor="hand2")
         self.ov.grid(row=r, column=0, sticky="ew"); r += 1
         self.cpbar = theme.register(tk.Canvas(right, height=28, highlightthickness=0), "bg")
         self.cpbar.grid(row=r, column=0, sticky="ew"); r += 1
@@ -242,27 +270,15 @@ class ReviewTab(ttk.Frame):
         cpr.grid(row=r, column=0, sticky="ew", pady=(0, 3)); r += 1
         ttk.Label(cpr, text="Checkpoints: play ±").pack(side="left")
         self.v_cp_len = tk.DoubleVar(value=self.app.settings.checkpoint_seconds)
-        ttk.Spinbox(cpr, from_=0.2, to=15, increment=0.1, width=5, textvariable=self.v_cp_len,
-                    command=self._save_globals).pack(side="left", padx=(3, 0))
+        theme.hint(ttk.Spinbox(cpr, from_=0.2, to=15, increment=0.1, width=5, textvariable=self.v_cp_len,
+                    command=self._save_globals), 'How many seconds before and after a checkpoint to play.').pack(side="left", padx=(3, 0))
         ttk.Label(cpr, text="s").pack(side="left")
         self.v_loop = tk.BooleanVar(value=self.app.settings.loop_checkpoints)
-        ttk.Checkbutton(cpr, text="Loop", variable=self.v_loop,
-                        command=self._save_globals).pack(side="left", padx=8)
-        ttk.Button(cpr, text="Reset points", command=self._default_checkpoints).pack(side="left")
+        theme.hint(ttk.Checkbutton(cpr, text="Loop", variable=self.v_loop,
+                        command=self._save_globals), 'Repeat a checkpoint until you stop it.').pack(side="left", padx=8)
+        theme.hint(ttk.Button(cpr, text="Reset points", command=self._default_checkpoints), 'Back to the default checkpoints: the first and last lyric line.').pack(side="left")
         self.sc = tk.Canvas(right, height=128, background=BG, highlightthickness=0, cursor="sb_h_double_arrow")
         self.sc.grid(row=r, column=0, sticky="ew"); r += 1
-        self._hint_text = (
-            "Drag either waveform to scrub. Overview: click = add checkpoint · Ctrl+click or right-click = remove · "
-            "Shift+click = jump there · "
-            "right-click a ▶ button to delete that checkpoint. New lyrics: click 📌 to pin a line, click a time "
-            "to edit it (empty = reset), right-click a line for more. Keys work unless you're typing in a box.  "
-            "Keys 1–9 play checkpoints, 0 = next, Space = play/pause. Lanes: current (gold) / new (green)."
-        )
-        self.lbl_hint = ttk.Label(right, text="ⓘ  Mouse & keyboard shortcuts (hover)", style="Caption.TLabel",
-                                  cursor="question_arrow")
-        self.lbl_hint.grid(row=r, column=0, sticky="w", pady=(2, 0)); r += 1
-        self.lbl_hint.bind("<Enter>", lambda e: self.tooltip.show(self._hint_text, e.x_root, e.y_root + 200))
-        self.lbl_hint.bind("<Leave>", lambda e: self.tooltip.hide())
 
         tcard = theme.card(right, padding=(12, 8))
         tcard.grid(row=r, column=0, sticky="ew", pady=(8, 4)); r += 1
@@ -272,27 +288,29 @@ class ReviewTab(ttk.Frame):
         tm.pack(fill="x")
         ttk.Label(tm, text="Offset (ms)").pack(side="left")
         self.v_offset = tk.DoubleVar(value=0.0)
-        ttk.Spinbox(tm, from_=-600000, to=600000, increment=50, width=7, textvariable=self.v_offset
-                    ).pack(side="left", padx=(2, 10))
+        theme.hint(ttk.Spinbox(tm, from_=-600000, to=600000, increment=50, width=7, textvariable=self.v_offset
+                    ), 'Shift all new lyric times (milliseconds; + is later). Pinned and edited lines stay put.').pack(side="left", padx=(2, 10))
         ttk.Label(tm, text="Stretch (%)").pack(side="left")
         self.v_stretch = tk.DoubleVar(value=100.0)
-        ttk.Spinbox(tm, from_=50, to=200, increment=0.05, width=7, textvariable=self.v_stretch
-                    ).pack(side="left", padx=(2, 10))
-        ttk.Button(tm, text="Stretch to song length", command=self._stretch_to_length).pack(side="left")
+        theme.hint(ttk.Spinbox(tm, from_=50, to=200, increment=0.05, width=7, textvariable=self.v_stretch
+                    ), 'Stretch the new lyric timing (100 % = unchanged).').pack(side="left", padx=(2, 10))
+        theme.hint(ttk.Button(tm, text="Stretch to song length", command=self._stretch_to_length), "Scale the timing by this song's length ÷ the length of the version the lyrics were made for (from LRCLIB or the [length:] tag; asks if unknown).").pack(side="left")
         tm2 = ttk.Frame(tcard, style=cs)
         tm2.pack(fill="x", pady=(8, 0))
-        ttk.Button(tm2, text="Align selected line to playhead", command=self._align).pack(side="left", padx=(0, 8))
+        theme.hint(ttk.Button(tm2, text="Align selected line to playhead", command=self._align), "Click a line in New, play to where it's actually sung, then press: one aligned line sets the offset, two set offset and stretch.").pack(side="left", padx=(0, 8))
         ttk.Label(tm2, text="Pins & edits:").pack(side="left", padx=(0, 4))
         self.btn_interp = theme.flat_button(tm2, "Interpolate from pins", self._toggle_interpolate, padx=10)
+        theme.hint(self.btn_interp, "Re-time every line you haven't pinned or edited by stretching the original "
+                                    "timing between your pins. Updates live as you add pins; click again to turn off.")
         self.btn_interp.pack(side="left")
-        ttk.Button(tm2, text="Clear pins", command=self.clear_pins).pack(side="left", padx=(6, 0))
-        ttk.Button(tm2, text="Clear edited times", command=self.clear_edits).pack(side="left", padx=(4, 0))
+        theme.hint(ttk.Button(tm2, text="Clear pins", command=self.clear_pins), 'Remove all pins (edited times stay).').pack(side="left", padx=(6, 0))
+        theme.hint(ttk.Button(tm2, text="Clear edited times", command=self.clear_edits), 'Reset every time you edited back to the computed timing.').pack(side="left", padx=(4, 0))
         self.v_pins = tk.StringVar()
         ttk.Label(tm2, textvariable=self.v_pins, style="Muted.TLabel").pack(side="left", padx=8)
         self.spn_offset = None
         self.v_anchors = tk.StringVar(value="")
         ttk.Label(tm, textvariable=self.v_anchors, style="Muted.TLabel").pack(side="left", padx=6)
-        ttk.Button(tm, text="Reset timing", command=self._reset_timing).pack(side="right")
+        theme.hint(ttk.Button(tm, text="Reset timing", command=self._reset_timing), 'Clear offset, stretch, aligned lines, pins and edits.').pack(side="right")
         self.v_offset.trace_add("write", lambda *a: self._timing_changed())
         self.v_stretch.trace_add("write", lambda *a: self._timing_changed())
 
@@ -308,23 +326,26 @@ class ReviewTab(ttk.Frame):
         lp.add(nf, minsize=180, stretch="always")
         self._lyrics_paned = lp
         lp.bind("<Map>", lambda e: self.after(30, self._even_lyrics_split), add="+")
-        self.cmb_cand = ttk.Combobox(nf, state="readonly")
+        self.cmb_cand = theme.hint(ttk.Combobox(nf, state="readonly"), 'Lyrics to compare and choose from: what Find found, sidecars, collection, LRCLIB, the current lyrics (to re-time), the originals, or none.')
         self.cmb_cand.pack(fill="x", pady=(0, 4))
         self.cmb_cand.bind("<<ComboboxSelected>>", lambda e: (self._select_candidate(self.cmb_cand.current()),
                                                               self._grab_keys()))
         self.btn_keep = theme.flat_button(lf, "Keep current", self._lock, pady=8)
+        theme.hint(self.btn_keep, "Leave this song's lyrics as they are (Apply skips it, later runs too).")
         self.btn_keep.pack(side="bottom", fill="x", pady=(8, 0))
         self.btn_apply = theme.flat_button(nf, "Use new", self._apply, pady=8)
+        theme.hint(self.btn_apply, "Use the lyrics shown on the right, with any timing changes. Written when you "
+                                   "press Apply (or right-click the song → Save now).")
         self.btn_apply.pack(side="bottom", fill="x", pady=(8, 0))
         self.txt_cur = self._lyrics_text(lf, "cur")
         self.txt_new = self._lyrics_text(nf, "new")
 
         act = ttk.Frame(right)
         act.grid(row=r, column=0, sticky="ew", pady=(6, 0)); r += 1
-        ttk.Button(act, text="Reset to default (clear my choice)", command=self._clear).pack(side="left")
+        theme.hint(ttk.Button(act, text="Reset to default (clear my choice)", command=self._clear), 'Forget your choice for this song; the default (what Find picked) applies again.').pack(side="left")
         self.v_choice_note = tk.StringVar()
         ttk.Label(act, textvariable=self.v_choice_note, style="Muted.TLabel").pack(side="left", padx=8)
-        ttk.Button(act, text="Search LRCLIB", command=self._search_lrclib).pack(side="right")
+        theme.hint(ttk.Button(act, text="Search LRCLIB", command=self._search_lrclib), "Search LRCLIB for more versions of this song's lyrics.").pack(side="right")
 
         self.tooltip = Tooltip(self)
         for c in (self.ov, self.sc):
@@ -336,12 +357,11 @@ class ReviewTab(ttk.Frame):
         self.ov.bind("<B1-Motion>", self._ov_motion)
         self.ov.bind("<ButtonRelease-1>", self._ov_release)
         self.ov.bind("<Control-Button-1>", self._ov_ctrl_click)
-        self.ov.bind("<Button-3>", self._ov_ctrl_click)
-        self.ov.bind("<Shift-Button-1>", self._ov_shift_click)
+        self.ov.bind("<Button-3>", self._ov_right_click)
         self.sc.bind("<ButtonPress-1>", self._sc_press)
         self.sc.bind("<B1-Motion>", self._sc_motion)
         self.sc.bind("<ButtonRelease-1>", self._sc_release)
-        self._sc_wave = None
+        self._scene = None
 
     def _first_map(self, _e=None) -> None:
         if getattr(self, "_sash_done", False):
@@ -598,6 +618,14 @@ class ReviewTab(ttk.Frame):
         if node:
             self.cycle_choice(node)
         return None
+
+    def _tree_motion(self, e) -> None:
+        if self.tree.identify_region(e.x, e.y) == "heading":
+            text = COLUMN_HINTS.get(self.tree.identify_column(e.x), "")
+            if text:
+                self._head_tip.show(text, e.x_root, e.y_root + 90)
+                return
+        self._head_tip.hide()
 
     def selected_songs(self) -> list[str]:
         out, seen = [], set()
@@ -869,8 +897,7 @@ class ReviewTab(ttk.Frame):
         self.cp_custom = "checkpoints" in prefs
         self.checkpoints = sorted(prefs.get("checkpoints", []))
         self._select_candidate(idx, restore=prefs)
-        self._sc_wave = None
-        self.sc.delete("all")
+        self._invalidate_scene()
 
     def _refresh_override(self, path: str) -> None:
         try:
@@ -1270,28 +1297,48 @@ class ReviewTab(ttk.Frame):
             self.player.seek(self._ov_time(e.x))
 
     def _ov_release(self, e) -> None:
+        """A plain click (no drag) on the overview jumps there."""
         d, self._ov_drag = self._ov_drag, None
-        if d is None or d["moved"] or not self._duration():
+        if d is None or d["moved"] or self.audio is None:
             return
-        self._ov_click(e)
+        self.cp_range = None
+        self.player.seek(self._ov_time(e.x))
 
     def _ov_click(self, e) -> None:
+        """Add a checkpoint at x."""
         if not self._duration():
             return
         self.checkpoints = sorted(self.checkpoints + [round(self._ov_time(e.x), 2)])
         self.cp_custom = True
         self._checkpoints_changed()
 
+    def _nearest_checkpoint(self, x: float) -> int | None:
+        if not self.checkpoints or not self._duration():
+            return None
+        w = max(1, self.ov.winfo_width())
+        xs = [t / self._duration() * w for t in self.checkpoints]
+        i = min(range(len(xs)), key=lambda k: abs(xs[k] - x))
+        return i if abs(xs[i] - x) <= max(12, w * 0.01) else None
+
     def _ov_ctrl_click(self, e) -> str:
-        """Ctrl+click (or right-click) on the overview removes the nearest checkpoint."""
+        """Ctrl+click on the overview: remove the checkpoint under the pointer, or add one there."""
         self._grab_keys()
         self._ov_drag = None
-        if self.checkpoints and self._duration():
-            w = max(1, self.ov.winfo_width())
-            xs = [t / self._duration() * w for t in self.checkpoints]
-            i = min(range(len(xs)), key=lambda k: abs(xs[k] - e.x))
-            if abs(xs[i] - e.x) <= max(24, w * 0.02):
-                self.delete_checkpoint(i)
+        if not self._duration():
+            return "break"
+        i = self._nearest_checkpoint(e.x)
+        if i is not None:
+            self.delete_checkpoint(i)
+        else:
+            self._ov_click(e)
+        return "break"
+
+    def _ov_right_click(self, e) -> str:
+        """Right-click on the overview removes the nearest checkpoint (never adds)."""
+        self._grab_keys()
+        i = self._nearest_checkpoint(e.x)
+        if i is not None:
+            self.delete_checkpoint(i)
         return "break"
 
     def delete_checkpoint(self, i: int) -> str:
@@ -1303,14 +1350,6 @@ class ReviewTab(ttk.Frame):
                 self.cp_range = None
             self.cp_cycle = -1
             self._checkpoints_changed()
-        return "break"
-
-    def _ov_shift_click(self, e) -> str:
-        self._grab_keys()
-        self._ov_drag = {"x": e.x, "moved": True}   # shift-drag scrubs too; never adds a checkpoint
-        if self.audio is not None:
-            self.cp_range = None
-            self.player.seek(self._ov_time(e.x))
         return "break"
 
     def _sc_press(self, e) -> None:
@@ -1381,6 +1420,8 @@ class ReviewTab(ttk.Frame):
             b = theme.flat_button(self.cpbar, label, lambda k=i: self.play_checkpoint(k), padx=6, pady=1,
                                   takefocus=0)
             theme.set_flat_kind(b, "accent")
+            theme.hint(b, f"Play checkpoint {i + 1} at {fmt_time(t)}" + (f" (key {i + 1})" if i < 9 else "")
+                       + ". Right-click to delete it.")
             for seq in ("<Button-3>", "<Button-2>") if sys.platform == "darwin" else ("<Button-3>",):
                 b.bind(seq, lambda e, k=i: self.delete_checkpoint(k))
             x = min(max(t / dur * w, 16), w - 16)
@@ -1400,9 +1441,49 @@ class ReviewTab(ttk.Frame):
         except OSError:
             pass
 
+    def set_volume(self, level: float, save: bool = True) -> None:
+        self.v_volume.set(max(0.0, min(100.0, float(level))))
+        self._volume_changed()
+        if save:
+            self._save_globals()
+
+    def _volume_wheel(self, e) -> str:
+        up = getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4
+        self.set_volume(round(self.v_volume.get()) + (2 if up else -2))
+        return "break"
+
+    def _edit_volume(self) -> None:
+        """Click the % to type a level: Enter/clicking away saves, Esc cancels."""
+        if getattr(self, "_vol_editor", None) is not None:
+            return
+        lbl = self.lbl_volume
+        ent = ttk.Entry(lbl.master, width=5, justify="right")
+        ent.insert(0, str(int(round(self.v_volume.get()))))
+        ent.select_range(0, "end")
+        ent.place(in_=lbl, x=0, y=0, relwidth=1.0, relheight=1.0)
+        ent.focus_set()
+        self._vol_editor = ent
+
+        def close(save: bool):
+            if self._vol_editor is not ent:
+                return
+            raw = ent.get().strip().rstrip("%").strip()
+            self._vol_editor = None
+            ent.destroy()
+            self._grab_keys()
+            if save and raw:
+                try:
+                    self.set_volume(float(raw))
+                except ValueError:
+                    pass
+        ent.bind("<Return>", lambda e: close(True))
+        ent.bind("<KP_Enter>", lambda e: close(True))
+        ent.bind("<Escape>", lambda e: close(False))
+        ent.bind("<FocusOut>", lambda e: close(True))
+
     def _volume_changed(self, _value=None) -> None:
         v = max(0.0, min(100.0, float(self.v_volume.get())))
-        self.player.volume = v / 100.0
+        self.player.volume = volume_gain(v)
         self.v_volume_txt.set(f"{int(round(v))}%")
 
     def _save_prefs_later(self) -> None:
@@ -1437,10 +1518,17 @@ class ReviewTab(ttk.Frame):
             return
         mid, amp = 24, 22
         if self.audio is not None:
+            import numpy as np
+
             env = envelope(self.audio.peaks, 0, dur, w)
-            top = [v for x in range(w) for v in (x, mid - env[x] * amp)]
-            bot = [v for x in range(w - 1, -1, -1) for v in (x, mid + env[x] * amp)]
-            c.create_polygon(*top, *bot, fill=WAVE, outline="")
+            hh = mid * 2
+            ys = np.arange(hh, dtype=np.float32)[:, None]
+            img = np.empty((hh, w, 3), dtype=np.uint8)
+            img[:] = _hex_rgb(BG)
+            img[np.abs(ys - mid) <= env[None, :] * amp] = _hex_rgb(WAVE)
+            self._ov_photo = tk.PhotoImage(master=c, width=w, height=hh, format="PPM",
+                                           data=f"P6 {w} {hh} 255 ".encode() + img.tobytes())
+            c.create_image(0, 0, image=self._ov_photo, anchor="nw")
         for which, segs, y0, cols in (("cur", self.cur_segs, 52, (CUR_A, CUR_B)),
                                       ("new", self.new_segs, 64, (NEW_A, NEW_B))):
             for i, sg in enumerate(segs):
@@ -1457,48 +1545,150 @@ class ReviewTab(ttk.Frame):
                           font=("TkDefaultFont", 8, "bold"))
         self._ov_pos = c.create_line(0, 0, 0, h, fill=PLAYHEAD, width=2)
 
-    def _draw_scroll(self, pos: float) -> None:
-        c = self.sc
-        w, h = max(2, c.winfo_width()), int(c.cget("height"))
-        c.delete("dyn")
+    # ------------------------------------------- scrolling waveform (pre-rendered, scrolled view)
+    # The waveform is rendered once into image tiles and the lyric lanes are created once, in
+    # "world" coordinates (x = pad + seconds * px_per_second). Each frame only scrolls the canvas
+    # view and moves a few items (playhead, progress fill, current word) instead of redrawing.
+    TILE = 2048
+    WAVE_H = 86
+
+    def _invalidate_scene(self) -> None:
+        self._scene = None
+        self.sc.delete("all")
+
+    def _ensure_scene(self) -> dict | None:
         if self.audio is None:
-            return
-        mid, amp = 44, 40
-        start = pos - WINDOW / 2
-        env = envelope(self.audio.peaks, start, start + WINDOW, w)
-        top = [v for x in range(w) for v in (x, mid - env[x] * amp)]
-        bot = [v for x in range(w - 1, -1, -1) for v in (x, mid + env[x] * amp)]
-        if self._sc_wave is None or not c.find_withtag("wave"):
+            return None
+        c = self.sc
+        w = max(2, c.winfo_width())
+        sc = getattr(self, "_scene", None)
+        if sc is None or sc["w"] != w or sc["audio"] is not self.audio:
             c.delete("all")
-            self._sc_wave = c.create_polygon(*top, *bot, fill=WAVE, outline="", tags="wave")
-            self._sc_center = c.create_line(w / 2, 0, w / 2, h, fill=PLAYHEAD, width=2, tags="center")
-        else:
-            c.coords(self._sc_wave, *top, *bot)
-            c.coords(self._sc_center, w / 2, 0, w / 2, h)
-        px = w / WINDOW
-        for segs, y0, cols, on in ((self.cur_segs, 90, (CUR_A, CUR_B), CUR_ON),
-                                   (self.new_segs, 109, (NEW_A, NEW_B), NEW_ON)):
+            dur = self.audio.duration
+            pps = w / WINDOW
+            n = max(1, int(round(dur * pps)))
+            sc = {"w": w, "audio": self.audio, "pps": pps, "pad": w / 2.0, "total": n + w,
+                  "env": envelope(self.audio.peaks, 0.0, dur, n), "tiles": {}, "lanes": None}
+            c.configure(scrollregion=(0, 0, sc["total"], int(c.cget("height"))), xscrollincrement=1)
+            h = int(c.cget("height"))
+            sc["center"] = c.create_line(0, 0, 0, h, fill=PLAYHEAD, width=2, tags="center")
+            self._scene = sc
+        lanes = (id(self.cur_segs), id(self.new_segs))
+        if sc["lanes"] != lanes:
+            self._build_lanes(sc)
+            sc["lanes"] = lanes
+        return sc
+
+    def _build_lanes(self, sc: dict) -> None:
+        c = self.sc
+        c.delete("lane")
+        pad, pps = sc["pad"], sc["pps"]
+        sc["lane_items"] = {}
+        for which, segs, y0, cols, on in (("cur", self.cur_segs, 90, (CUR_A, CUR_B), CUR_ON),
+                                          ("new", self.new_segs, 109, (NEW_A, NEW_B), NEW_ON)):
             for i, sg in enumerate(segs):
-                if sg.end < start or sg.start > start + WINDOW:
-                    continue
-                x0, x1 = (sg.start - start) * px, (sg.end - start) * px - 1
-                active = sg.start <= pos < sg.end
-                c.create_rectangle(x0, y0, x1, y0 + 17, fill=cols[i % 2], outline="", tags="dyn")
-                if active:
-                    fx = (pos - start) * px
-                    c.create_rectangle(x0, y0, min(fx, x1), y0 + 17, fill=on, outline="", tags="dyn")
-                for ws, we, word in sg.words:
-                    if ws <= pos < we:
-                        c.create_rectangle((ws - start) * px, y0, (we - start) * px - 1, y0 + 17,
-                                           outline="#ffffff", width=1, tags="dyn")
+                x0, x1 = pad + sg.start * pps, pad + sg.end * pps - 1
+                c.create_rectangle(x0, y0, x1, y0 + 17, fill=cols[i % 2], outline="", tags=("lane", "lanebg"))
+            prog = c.create_rectangle(0, y0, 0, y0 + 17, fill=on, outline="", state="hidden",
+                                      tags=("lane", "laneprog"))
+            for sg in segs:
+                for ws, _, _ in sg.words:
                     if ws > sg.start:
-                        c.create_line((ws - start) * px, y0, (ws - start) * px, y0 + 17, fill=BG, tags="dyn")
-                room = int((x1 - max(x0, 0)) / 7)
+                        x = pad + ws * pps
+                        c.create_line(x, y0, x, y0 + 17, fill=BG, tags=("lane", "lanediv"))
+            word = c.create_rectangle(0, y0, 0, y0 + 17, outline="#ffffff", width=1, state="hidden",
+                                      tags=("lane", "laneword"))
+            texts = []
+            for sg in segs:
+                x0, x1 = pad + sg.start * pps, pad + sg.end * pps - 1
+                room = int((x1 - x0) / 7)
                 if room > 2:
                     txt = sg.text if len(sg.text) <= room else sg.text[: max(1, room - 1)] + "…"
-                    c.create_text(max(x0, 0) + 3, y0 + 9, text=txt, anchor="w", fill="#111",
-                                  font=("TkDefaultFont", 8), tags="dyn")
+                    texts.append(c.create_text(x0 + 3, y0 + 9, text=txt, anchor="w", fill="#111",
+                                               font=("TkDefaultFont", 8), tags=("lane", "lanetext")))
+                else:
+                    texts.append(None)
+            # label that sticks to the left edge for a line that started before the view
+            sticky = c.create_text(0, y0 + 9, text="", anchor="w", fill="#111", font=("TkDefaultFont", 8),
+                                   state="hidden", tags=("lane", "lanetext"))
+            sc["lane_items"][which] = (segs, prog, word, texts, sticky)
+        sc["sticky_hidden"] = {}
+        c.tag_raise("laneprog", "lanebg")
+        c.tag_raise("lanediv")
+        c.tag_raise("laneword")
+        c.tag_raise("lanetext")
         c.tag_raise("center")
+
+    def _tile(self, sc: dict, k: int) -> None:
+        env = sc["env"]
+        a, b = k * self.TILE, min(len(env), (k + 1) * self.TILE)
+        if b <= a or k in sc["tiles"]:
+            return
+        import numpy as np
+
+        h, mid, amp = self.WAVE_H, 44, 40
+        ys = np.arange(h, dtype=np.float32)[:, None]
+        mask = np.abs(ys - mid) <= env[None, a:b] * amp
+        img = np.empty((h, b - a, 3), dtype=np.uint8)
+        img[:] = _hex_rgb(BG)
+        img[mask] = _hex_rgb(WAVE)
+        photo = tk.PhotoImage(master=self.sc, width=b - a, height=h, format="PPM",
+                              data=f"P6 {b - a} {h} 255 ".encode() + img.tobytes())
+        item = self.sc.create_image(sc["pad"] + a, 0, image=photo, anchor="nw", tags="tile")
+        self.sc.tag_lower(item)
+        sc["tiles"][k] = (photo, item)
+
+    def _draw_scroll(self, pos: float) -> None:
+        sc = self._ensure_scene()
+        if sc is None:
+            return
+        c, w, pps, pad = self.sc, sc["w"], sc["pps"], sc["pad"]
+        left = pos * pps                                   # world x of the view's left edge
+        c.xview_moveto(max(0.0, left) / sc["total"])
+        first, last = int((left - pad) // self.TILE), int((left + w - pad) // self.TILE)
+        for k in range(max(0, first), last + 1):
+            self._tile(sc, k)
+        for k in [k for k in sc["tiles"] if k < first - 2 or k > last + 2]:    # bound memory
+            photo, item = sc["tiles"].pop(k)
+            c.delete(item)
+        cx = left + w / 2
+        h = int(c.cget("height"))
+        c.coords(sc["center"], cx, 0, cx, h)
+        view_t = (left - pad) / pps                        # time at the view's left edge
+        for which, (segs, prog, word, texts, sticky) in sc.get("lane_items", {}).items():
+            j = lrcmod.segment_at(segs, view_t)
+            prev = sc["sticky_hidden"].get(which)
+            if prev is not None and prev != j and texts[prev] is not None:
+                c.itemconfigure(texts[prev], state="normal")
+            if j >= 0 and texts[j] is not None and segs[j].start < view_t:
+                sg = segs[j]
+                room = int((pad + sg.end * pps - 1 - left) / 7)
+                if room > 2:
+                    t = sg.text if len(sg.text) <= room else sg.text[: max(1, room - 1)] + "…"
+                    c.itemconfigure(sticky, text=t, state="normal")
+                    c.coords(sticky, left + 3, 90 + 9 if which == "cur" else 109 + 9)
+                else:
+                    c.itemconfigure(sticky, state="hidden")
+                c.itemconfigure(texts[j], state="hidden")
+                sc["sticky_hidden"][which] = j
+            else:
+                c.itemconfigure(sticky, state="hidden")
+                sc["sticky_hidden"][which] = None
+            i = lrcmod.segment_at(segs, pos)
+            if i < 0:
+                c.itemconfigure(prog, state="hidden")
+                c.itemconfigure(word, state="hidden")
+                continue
+            sg = segs[i]
+            y0 = 90 if which == "cur" else 109
+            c.coords(prog, pad + sg.start * pps, y0, pad + pos * pps, y0 + 17)
+            c.itemconfigure(prog, state="normal")
+            wd = next(((ws, we) for ws, we, _ in sg.words if ws <= pos < we), None)
+            if wd:
+                c.coords(word, pad + wd[0] * pps, y0, pad + wd[1] * pps - 1, y0 + 17)
+                c.itemconfigure(word, state="normal")
+            else:
+                c.itemconfigure(word, state="hidden")
 
     # =============================================================== hover
     def _hover(self, e) -> None:
@@ -1522,6 +1712,7 @@ class ReviewTab(ttk.Frame):
                 parts.append(f"{name}: {sg.text}" + (f"   [{word}]" if word else ""))
             elif segs:
                 parts.append(f"{name}: —")
+        parts.append("Click: jump · drag: scrub" + (" · Ctrl+click: add/remove checkpoint" if e.widget is self.ov else ""))
         self.tooltip.show("\n".join(parts), e.x_root, e.y_root)
 
     # ============================================================ playback

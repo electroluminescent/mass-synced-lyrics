@@ -99,9 +99,13 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     class Ev:
         def __init__(self, x):
             self.x, self.y = x, 10
-    rv._ov_click(Ev(w * 0.5))
+    rv._ov_press(Ev(w * 0.5))                       # plain click = jump, no checkpoint
+    rv._ov_release(Ev(w * 0.5))
+    assert len(rv.checkpoints) == 2
+    assert rv.player.position() == pytest.approx(rv._duration() * 0.5, abs=0.1)
+    rv._ov_ctrl_click(Ev(w * 0.5))                  # Ctrl+click = add
     assert len(rv.checkpoints) == 3 and rv.cp_custom
-    rv._ov_ctrl_click(Ev(w * 0.5 + 3))
+    rv._ov_ctrl_click(Ev(w * 0.5 + 3))              # Ctrl+click on it = remove
     assert len(rv.checkpoints) == 2
 
     # number key (real key event through the app's binding) plays a checkpoint window then stops,
@@ -139,19 +143,42 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     assert rv.player.playing and rv.cp_range[0] == pytest.approx(8.2 - 0.3)
     rv.player.pause()
     rv.cp_range = None
-    rv._ov_click(Ev(w * 0.3))
+    rv._ov_ctrl_click(Ev(w * 0.3))
     app.update()
     assert len(rv.checkpoints) == 3 and len(rv._cp_buttons) == 3
     rv._cp_buttons[1].event_generate("<Button-3>", x=3, y=3)
     app.update()
     assert rv.checkpoints == [1.0, 8.2] and len(rv._cp_buttons) == 2
-    rv._ov_ctrl_click(Ev(w * 0.82 + 15))   # forgiving target
+    rv._ov_right_click(Ev(w * 0.82 + 8))     # right-click near a checkpoint removes it
+    assert rv.checkpoints == [1.0]
+    rv._ov_right_click(Ev(w * 0.6))          # ...but never adds one
     assert rv.checkpoints == [1.0]
 
     # volume
-    rv.v_volume.set(25)
-    rv._volume_changed()
-    assert rv.player.volume == pytest.approx(0.25)
+    from mass_synced_lyrics.player import volume_gain
+    rv.set_volume(25, save=False)
+    assert rv.player.volume == pytest.approx(volume_gain(25))
+    # click the % to type a level
+    rv._edit_volume()
+    app.update()
+    rv._vol_editor.delete(0, "end")
+    rv._vol_editor.insert(0, "60%")
+    rv._vol_editor.event_generate("<Return>")
+    app.update()
+    assert rv.v_volume.get() == pytest.approx(60) and rv.v_volume_txt.get() == "60%"
+    assert rv.player.volume == pytest.approx(volume_gain(60))
+    rv._edit_volume()
+    rv._vol_editor.delete(0, "end")
+    rv._vol_editor.insert(0, "150")
+    rv._vol_editor.event_generate("<Escape>")
+    app.update()
+    assert rv.v_volume.get() == pytest.approx(60)            # Esc keeps the old level
+    rv._edit_volume()
+    rv._vol_editor.delete(0, "end")
+    rv._vol_editor.insert(0, "150")
+    rv._vol_editor.event_generate("<Return>")
+    app.update()
+    assert rv.v_volume.get() == pytest.approx(100)           # clamped
 
     # timing: align line 2 (orig 4.5s) to 5.0s -> +0.5s offset
     rv.sel_line = 1

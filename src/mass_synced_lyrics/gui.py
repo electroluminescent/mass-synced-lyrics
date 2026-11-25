@@ -93,28 +93,25 @@ class App(tk.Tk):
         lib = theme.card(root)
         lib.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
         lib.columnconfigure(0, weight=1)
-        ttk.Label(lib, text="Music library", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(lib, text="The folder to scan (sub-folders included).", style="Caption.TLabel"
-                  ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(lib, text="Music library", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.v_folder = tk.StringVar()
-        ttk.Entry(lib, textvariable=self.v_folder).grid(row=2, column=0, sticky="ew")
-        ttk.Button(lib, text="Browse…", command=self._browse_music).grid(row=2, column=1, padx=(8, 0))
+        theme.hint(ttk.Entry(lib, textvariable=self.v_folder), 'The music folder to scan. Sub-folders are included.').grid(row=2, column=0, sticky="ew")
+        theme.hint(ttk.Button(lib, text="Browse…", command=self._browse_music), 'Choose the music folder to scan.').grid(row=2, column=1, padx=(8, 0))
 
         ttk.Separator(lib).grid(row=3, column=0, columnspan=2, sticky="ew", pady=14)
-        ttk.Label(lib, text="Your own LRC collection", style="Section.TLabel").grid(row=4, column=0, sticky="w")
-        ttk.Label(lib, text="Folders or .lrc files to use before searching online.", style="Caption.TLabel"
-                  ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(lib, text="Your own LRC collection", style="Section.TLabel").grid(row=4, column=0, sticky="w",
+                                                                                pady=(0, 6))
         self.v_use_collection = tk.BooleanVar()
-        ttk.Checkbutton(lib, text="Use these folders / files", variable=self.v_use_collection,
+        theme.hint(ttk.Checkbutton(lib, text="Use these folders / files", variable=self.v_use_collection,
                         style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
-                        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
-        self.lst_collection = theme.register(tk.Listbox(lib, height=5, selectmode="extended"), "listbox")
+                        ), 'Look in your own .lrc files (listed below) before searching online. Collection files are never moved or deleted.').grid(row=6, column=0, sticky="w", pady=(0, 6))
+        self.lst_collection = theme.register(theme.hint(tk.Listbox(lib, height=5, selectmode="extended"), "Folders and .lrc files from your own collection. They're matched by their [ar:]/[ti:] tags or an 'Artist - Title.lrc' name, plus song length."), "listbox")
         self.lst_collection.grid(row=7, column=0, sticky="nsew")
         btns = ttk.Frame(lib, style="Card.TFrame" if theme._state["sv"] else "TFrame")
         btns.grid(row=7, column=1, sticky="n", padx=(8, 0))
-        ttk.Button(btns, text="Add folder…", command=self._add_collection_folder).pack(fill="x")
-        ttk.Button(btns, text="Add files…", command=self._add_collection_files).pack(fill="x", pady=6)
-        ttk.Button(btns, text="Remove", command=self._remove_collection).pack(fill="x")
+        theme.hint(ttk.Button(btns, text="Add folder…", command=self._add_collection_folder), 'Add a folder of .lrc files (searched recursively) to your collection.').pack(fill="x")
+        theme.hint(ttk.Button(btns, text="Add files…", command=self._add_collection_files), 'Add individual .lrc files to your collection.').pack(fill="x", pady=6)
+        theme.hint(ttk.Button(btns, text="Remove", command=self._remove_collection), 'Remove the selected folders/files from the collection list (nothing is deleted).').pack(fill="x")
 
         # ---- right column: options
         opt = theme.card(root)
@@ -131,40 +128,45 @@ class App(tk.Tk):
         self.v_retry = tk.BooleanVar()
         sw = "Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
         r = 1
-        for text, var in (("Look up missing lyrics online (LRCLIB)", self.v_online),
-                          ("Identify untagged files with AcoustID", self.v_acoustid)):
-            ttk.Checkbutton(opt, text=text, variable=var, style=sw).grid(row=r, column=0, columnspan=2,
-                                                                       sticky="w", pady=2); r += 1
+        for text, var, tip in (("Look up missing lyrics online (LRCLIB)", self.v_online,
+                                 "Search LRCLIB, a free community lyrics database, for songs without local lyrics."),
+                                ("Identify untagged files with AcoustID", self.v_acoustid,
+                                 "Fingerprint files that have no title/artist tags to find out what they are.")):
+            theme.hint(ttk.Checkbutton(opt, text=text, variable=var, style=sw), tip).grid(
+                row=r, column=0, columnspan=2, sticky="w", pady=2); r += 1
         kf = ttk.Frame(opt, style="Card.TFrame" if theme._state["sv"] else "TFrame")
-        kf.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(2, 0)); r += 1
+        kf.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(2, 8)); r += 1
         kf.columnconfigure(1, weight=1)
         ttk.Label(kf, text="AcoustID key").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.ent_key = ttk.Entry(kf, textvariable=self.v_key, show="•")
+        self.ent_key = theme.hint(ttk.Entry(kf, textvariable=self.v_key, show="•"),
+                                  ("Blank = built-in key. " if DEFAULT_ACOUSTID_KEY else "")
+                                  + "AcoustID needs an application key from acoustid.org/new-application "
+                                  "(a personal user key is rejected). Only used for files with no title/artist tags.")
         self.ent_key.grid(row=0, column=1, sticky="ew")
         self.v_showkey = tk.BooleanVar()
-        ttk.Checkbutton(kf, text="Show", variable=self.v_showkey,
+        theme.hint(ttk.Checkbutton(kf, text="Show", variable=self.v_showkey,
                         command=lambda: self.ent_key.config(show="" if self.v_showkey.get() else "•")
-                        ).grid(row=0, column=2, padx=(8, 0))
-        ttk.Label(opt, text=("Blank = built-in key. " if DEFAULT_ACOUSTID_KEY else "")
-                  + "Needs an application key from acoustid.org/new-application.", style="Caption.TLabel",
-                  wraplength=420).grid(row=r, column=0, columnspan=2, sticky="w", pady=(2, 8)); r += 1
+                        ), 'Show or hide the key.').grid(row=0, column=2, padx=(8, 0))
         for label, widget in (("After using a sidecar .lrc", "action"), ("Match confidence (70–100)", "thr"),
                               ("When the app starts", "session")):
             ttk.Label(opt, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
             if widget == "action":
-                self.cmb_action = ttk.Combobox(opt, state="readonly", values=[lbl for _, lbl in LRC_ACTIONS])
+                self.cmb_action = theme.hint(ttk.Combobox(opt, state="readonly", values=[lbl for _, lbl in LRC_ACTIONS]), 'What happens to a sidecar .lrc after its lyrics are applied: Recycle Bin, delete, or keep. A <song>.lrc that is itself the output is never removed.')
                 self.cmb_action.grid(row=r, column=1, sticky="ew")
             elif widget == "thr":
-                ttk.Spinbox(opt, from_=70, to=100, textvariable=self.v_threshold, width=8
-                            ).grid(row=r, column=1, sticky="w")
+                theme.hint(ttk.Spinbox(opt, from_=70, to=100, textvariable=self.v_threshold, width=8
+                            ), 'How closely names must match for a sidecar or collection .lrc to be used automatically. Lower finds more, higher is stricter.').grid(row=r, column=1, sticky="w")
             else:
-                self.cmb_session = ttk.Combobox(opt, state="readonly", values=[v for _, v in SESSION_MODES])
+                self.cmb_session = theme.hint(ttk.Combobox(opt, state="readonly", values=[v for _, v in SESSION_MODES]), 'What to do with the last review session when the app opens.')
                 self.cmb_session.grid(row=r, column=1, sticky="ew")
             r += 1
-        for text, var in (("Keep original file modified dates", self.v_mtime),
-                          ("Retry songs not found in earlier runs", self.v_retry)):
-            ttk.Checkbutton(opt, text=text, variable=var, style=sw).grid(row=r, column=0, columnspan=2,
-                                                                       sticky="w", pady=2); r += 1
+        for text, var, tip in (("Keep original file modified dates", self.v_mtime,
+                                 "After writing, put each file's modified date back so cloud sync and music "
+                                 "libraries don't treat it as changed."),
+                                ("Retry songs not found in earlier runs", self.v_retry,
+                                 "Search online again for songs that had no lyrics last time.")):
+            theme.hint(ttk.Checkbutton(opt, text=text, variable=var, style=sw), tip).grid(
+                row=r, column=0, columnspan=2, sticky="w", pady=2); r += 1
 
         # ---- bottom: actions + activity
         act = theme.card(root)
@@ -173,15 +175,13 @@ class App(tk.Tk):
         act.rowconfigure(3, weight=1)
         top = ttk.Frame(act, style="Card.TFrame" if theme._state["sv"] else "TFrame")
         top.grid(row=0, column=0, sticky="ew")
-        self.btn_start = ttk.Button(top, text="  Find lyrics  ", command=self._start,
-                                    style="Accent.TButton" if theme._state["sv"] else "TButton")
+        self.btn_start = theme.hint(ttk.Button(top, text="  Find lyrics  ", command=self._start,
+                                    style="Accent.TButton" if theme._state["sv"] else "TButton"), 'Scan the music folder and find lyrics: sidecar .lrc files, your collection, then LRCLIB. Nothing is written until you press Apply at the bottom.')
         self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(top, text="Stop", command=self._stop, state="disabled")
+        self.btn_stop = theme.hint(ttk.Button(top, text="Stop", command=self._stop, state="disabled"), 'Stop after the current song. Run Find lyrics again to continue where it stopped.')
         self.btn_stop.pack(side="left", padx=8)
-        ttk.Label(top, text="Nothing is written until you press Apply at the bottom.", style="Caption.TLabel"
-                  ).pack(side="left", padx=8)
-        ttk.Button(top, text="Open logs folder", command=self._open_logs).pack(side="right")
-        self.btn_csv = ttk.Button(top, text="Open last CSV", command=self._open_csv, state="disabled")
+        theme.hint(ttk.Button(top, text="Open logs folder", command=self._open_logs), 'Open the folder with the CSV logs of every run and apply.').pack(side="right")
+        self.btn_csv = theme.hint(ttk.Button(top, text="Open last CSV", command=self._open_csv, state="disabled"), 'Open the CSV log of the last run (status, source and details for each song).')
         self.btn_csv.pack(side="right", padx=8)
         self.progress = ttk.Progressbar(act, mode="determinate")
         self.progress.grid(row=1, column=0, sticky="ew", pady=(12, 4))
@@ -216,8 +216,8 @@ class App(tk.Tk):
         ttk.Label(titles, text=f"Find, review and apply time-synced lyrics · v{__version__}",
                   style="Muted.TLabel").pack(anchor="w")
         self.v_dark = tk.BooleanVar(value=self.settings.theme == "dark")
-        ttk.Checkbutton(head, text="Dark mode", variable=self.v_dark, command=self._toggle_theme,
-                        style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton").pack(side="right")
+        theme.hint(ttk.Checkbutton(head, text="Dark mode", variable=self.v_dark, command=self._toggle_theme,
+                        style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"), 'Switch between light and dark appearance.').pack(side="right")
 
     def _toggle_theme(self) -> None:
         self.settings.theme = "dark" if self.v_dark.get() else "light"
@@ -342,14 +342,14 @@ class App(tk.Tk):
         row.pack(fill="x")
         ttk.Label(row, text="Final step", style="Section.TLabel").pack(side="left", padx=(0, 14))
         self.v_output = tk.StringVar(value="embed")
-        ttk.Radiobutton(row, text="Overwrite files (embed lyrics)", value="embed", variable=self.v_output,
-                        command=self._output_changed).pack(side="left", padx=(0, 10))
-        ttk.Radiobutton(row, text="Save .lrc beside each file", value="lrc", variable=self.v_output,
-                        command=self._output_changed).pack(side="left")
-        self.btn_apply_all = ttk.Button(row, text="Apply", command=self._apply_all,
-                                        style="Accent.TButton" if theme._state["sv"] else "TButton")
+        theme.hint(ttk.Radiobutton(row, text="Overwrite files (embed lyrics)", value="embed", variable=self.v_output,
+                        command=self._output_changed), "Apply writes the lyrics into each audio file's tags. Originals are backed up and can be restored.").pack(side="left", padx=(0, 10))
+        theme.hint(ttk.Radiobutton(row, text="Save .lrc beside each file", value="lrc", variable=self.v_output,
+                        command=self._output_changed), "Apply writes '<song name>.lrc' next to each song and leaves the audio files untouched.").pack(side="left")
+        self.btn_apply_all = theme.hint(ttk.Button(row, text="Apply", command=self._apply_all,
+                                        style="Accent.TButton" if theme._state["sv"] else "TButton"), 'Write the chosen lyrics for every song in the list that has something to write. To write just some songs, select them and right-click → Save now.')
         self.btn_apply_all.pack(side="right")
-        self.btn_apply_stop = ttk.Button(row, text="Stop", command=self._apply_stop)
+        self.btn_apply_stop = theme.hint(ttk.Button(row, text="Stop", command=self._apply_stop), 'Stop applying after the current song.')
         self.apply_progress = ttk.Progressbar(row, mode="determinate", length=160)
         self.v_apply = tk.StringVar(value="")
         ttk.Label(row, textvariable=self.v_apply, style="Muted.TLabel").pack(side="right", padx=12)
@@ -541,9 +541,9 @@ class App(tk.Tk):
                 self.nb.select(self.review)
             if restore:
                 self.restore_paths(list(data["rows"].keys()), confirm=False)
-        ttk.Button(btns, text="Start fresh", command=lambda: finish(False)).pack(side="right")
-        ttk.Button(btns, text="Load session", command=lambda: finish(True),
-                   style="Accent.TButton" if theme._state["sv"] else "TButton").pack(side="right", padx=6)
+        theme.hint(ttk.Button(btns, text="Start fresh", command=lambda: finish(False)), 'Start with an empty song list.').pack(side="right")
+        theme.hint(ttk.Button(btns, text="Load session", command=lambda: finish(True),
+                   style="Accent.TButton" if theme._state["sv"] else "TButton"), 'Reload the song list, choices and selection from last time.').pack(side="right", padx=6)
         dlg.protocol("WM_DELETE_WINDOW", lambda: finish(False))
         self._session_finish = finish
         dlg.update_idletasks()
