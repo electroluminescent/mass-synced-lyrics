@@ -937,3 +937,150 @@ def test_song_aligned_while_finding_opens_with_its_edits_visible(settings, tmp_p
     assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0]
     rv.shutdown()
     app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_activity_rows_install_block_log_times_and_current_pane(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    import re
+    import threading
+
+    from mass_synced_lyrics import ai_align, gui
+
+    d = settings.music_folder
+    make_track(os.path.join(d, "a.flac"), "flac")
+    write_lrc(os.path.join(d, "a.lrc"))
+    settings.use_online = False
+    settings.lrc_action = "keep"
+    app = new_app(settings)
+    rv = app.review
+    # the Current pane starts collapsed; Keep current sits beside Use new
+    assert str(rv._lf) not in [str(x) for x in rv._lyrics_paned.panes()]
+    assert rv.btn_keep2.winfo_manager() == "pack"
+    rv.set_current_shown(True)
+    assert str(rv._lf) in [str(x) for x in rv._lyrics_paned.panes()] and app.settings.show_current
+    assert rv.btn_keep2.winfo_manager() == ""
+    rv.set_current_shown(False)
+    assert not app.settings.show_current
+    # Find shows a row while it runs, gone when done
+    app._start()
+    assert app.activity.is_active("find")
+    for _ in range(300):
+        app.update()
+        if app.worker and not app.worker.is_alive() and app.events.empty():
+            app.update()
+            break
+        app.after(20)
+    app.update()
+    assert not app.activity.is_active("find")
+    # log lines carry the time
+    app.update()
+    lines = [x for x in app.txt.get("1.0", "end").splitlines() if x.strip()]
+    assert lines and all(re.match(r"^\d\d:\d\d:\d\d  ", x) for x in lines)
+    # installing the add-on: progress row with Stop; Find waits
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    monkeypatch.setattr(ai_align, "is_installed", lambda: False)
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **k: True)
+    infos = []
+    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: infos.append(a))
+    gate = threading.Event()
+
+    def fake_install(log, cancel, progress):
+        progress(0.25, "Installing PyTorch with CUDA (about 2.5 GB)", "torch: 640.0 MB of 2.5 GB")
+        while not cancel.is_set() and not gate.is_set():
+            cancel.wait(0.05)
+        return False
+    monkeypatch.setattr(ai_align, "install", fake_install)
+    app.v_ai.set(True)
+    app._ai_toggled()
+    assert _pump(app, lambda: app.activity.value("install") == 25.0)
+    assert "640.0 MB" in app.activity.detail("install")
+    assert str(app.btn_start.cget("state")) == "disabled"
+    app._start()                                                      # blocked while installing
+    assert infos and "still installing" in infos[-1][1] and not app.activity.is_active("find")
+    app.activity.rows["install"]["btn"].invoke()                      # Stop
+    assert _pump(app, lambda: not app.activity.is_active("install"))
+    assert not app.settings.ai_align and str(app.btn_start.cget("state")) == "normal"
+    # Align (GPU) with nothing low-confidence says so
+    monkeypatch.setattr(ai_align, "is_installed", lambda: True)
+    app.settings.ai_align = True
+    app.align_command("low")
+    assert "No songs in the list" in infos[-1][1]
+    rv.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_list_progress_columns_hide_columns_new_find_clears_and_remove(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    from mass_synced_lyrics import gui
+    from mass_synced_lyrics.config import load_settings
+    from mass_synced_lyrics.engine import Result
+    from mass_synced_lyrics.tags import Meta
+
+    settings.session_restore = "fresh"          # no "load last session?" question mid-test
+    app = new_app(settings)
+    rv = app.review
+    d = settings.music_folder
+    a = state_key(os.path.join(d, "Band", "Album", "01.flac"))
+    b = state_key(os.path.join(d, "Band", "Album", "02.flac"))
+    # Find: in progress, then done
+    app._handle({"type": "file_start", "path": a})
+    app.update()
+    assert rv.tree.exists(a) and rv.tree.set(a, "find") == "⟳" and "busy" in rv.tree.item(a, "tags")
+    assert rv.tree.set(a, "status") == "Looking up…"                       # shown though nothing found yet
+    r = Result(a, "proposed", "lrclib", Meta(title="One", artist="Band", album="Album"), 10.0,
+               online="found", choice="online", conf_online=97.0, fit_online=90.0)
+    app._handle({"type": "result", "result": r, "done": 1, "total": 2, "counts": {"proposed": 1}, "elapsed": 1})
+    app._handle({"type": "file_start", "path": b})
+    app.update()
+    assert rv.tree.set(a, "find") == "✓" and "busy" not in rv.tree.item(a, "tags")
+    grp = rv.tree.parent(rv.tree.parent(a))
+    app._handle({"type": "file_start", "path": b})
+    app.update()
+    # Save: in progress → done; Align marks
+    app._handle({"type": "apply_file_start", "path": a})
+    app.update()
+    assert rv.tree.set(a, "save") == "⟳"
+    app._handle({"type": "apply_progress", "path": a, "done": 1, "total": 1, "status": "embedded",
+                 "source": "lrclib", "detail": "", "counts": {}})
+    assert rv.tree.set(a, "save") == "✓"
+    app._handle({"type": "align_song_start", "path": a})
+    assert rv.tree.set(a, "align") == "⟳"
+    app._handle({"type": "align_song_start", "path": state_key(os.path.join(d, "x.flac"))})
+    assert state_key(os.path.join(d, "x.flac")) not in rv.rows            # only Find adds songs
+    # the end of a run clears anything still marked in progress
+    app._handle({"type": "done", "counts": {}, "csv": "x.csv", "elapsed": 1, "cancelled": True})
+    app.update()
+    assert rv.rows[b]["op_find"] == ""
+    # hide / show columns (remembered); clicks still find the Choice column by name
+    rv.toggle_column("local")
+    rv.toggle_column("online")
+    assert "local" not in rv._shown_columns() and load_settings().list_columns and \
+        "online" not in load_settings().list_columns
+    app.update()
+    box = rv.tree.bbox(a, column="choice")
+    assert box and rv._column_at(box[0] + 5) == "choice"
+    rv._apply_columns([c for c, _, _ in gui.__dict__.get("COLUMNS", [])] or ["status", "local", "online", "choice",
+                                                                             "match", "fit", "find", "align", "save"])
+    assert "local" in rv._shown_columns()
+    menu = rv._columns_menu()
+    assert menu.index("end") >= 9
+    # remove a group from the list
+    assert grp.startswith("grp:")
+    rv.v_only_found.set(False)
+    rv._refill()
+    grp = rv.tree.parent(rv.tree.parent(a))
+    n = rv.remove_from_list(rv._songs_under(grp))
+    assert n == 2 and not rv.rows and not rv.tree.get_children("")
+    # a new Find run starts with an empty list
+    rv.add_row(a, "proposed", "lrclib", "Band", "One", "", "found", "online", "Album")
+    monkeypatch.setattr(app, "_run_engine", lambda s: None)
+    os.makedirs(d, exist_ok=True)
+    app._start()
+    assert not rv.rows and rv.v_count.get().startswith("0 shown")
+    rv.shutdown()
+    app.destroy()

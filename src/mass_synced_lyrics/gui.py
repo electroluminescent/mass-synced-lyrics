@@ -268,6 +268,9 @@ class App(tk.Tk):
         self.btn_start.pack(side="left")
         self.btn_stop = theme.hint(ttk.Button(top, text="Stop", command=self._stop, state="disabled"), 'Stop after the current song. Run Find lyrics again to continue where it stopped.')
         self.btn_stop.pack(side="left", padx=8)
+        theme.hint(ttk.Button(top, text="Align low-confidence (GPU)", command=lambda: self.align_command("low")),
+                   "Align the songs in the list that are below High confidence or Good fit on the NVIDIA GPU "
+                   "(switches the option on if needed). Progress shows at the top of the window.").pack(side="left")
         theme.hint(ttk.Button(top, text="Open logs folder", command=self._open_logs), 'Open the folder with the CSV logs of every run and apply.').pack(side="right")
         self.btn_csv = theme.hint(ttk.Button(top, text="Open last CSV", command=self._open_csv, state="disabled"), 'Open the CSV log of the last run (status, source and details for each song).')
         self.btn_csv.pack(side="right", padx=8)
@@ -306,6 +309,8 @@ class App(tk.Tk):
         self.v_dark = tk.BooleanVar(value=self.settings.theme == "dark")
         theme.hint(ttk.Checkbutton(head, text="Dark mode", variable=self.v_dark, command=self._toggle_theme,
                         style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"), 'Switch between light and dark appearance.').pack(side="right")
+        from .activity import Activity
+        self.activity = Activity(head)             # one row per operation still running
 
     def _tidy_changed(self) -> None:
         self.settings.tidy_trim = bool(self.v_trim.get())
@@ -415,10 +420,17 @@ class App(tk.Tk):
             open_path(self.last_csv)
 
     def _start(self) -> None:
+        if self.activity.is_active("install"):
+            messagebox.showinfo(APP_TITLE, "The GPU add-on is still installing. Finding starts once it has "
+                                           "finished, or after you stop the installation (top of the window).")
+            return
         s = self._collect_settings()
         if not s.music_folder or not os.path.isdir(s.music_folder):
             messagebox.showerror(APP_TITLE, "Choose an existing music folder first.")
             return
+        self.activity.set("find", "Finding lyrics", None, detail="starting…", stop=self._stop)
+        self.review.clear_list()                  # the list shows this run's songs only
+        self.session_changed()
         save_settings(s)
         s = dataclasses.replace(s, dry_run=True)   # find only; the bottom bar writes
         self._switched_to_review = False
@@ -445,10 +457,13 @@ class App(tk.Tk):
 
     def _stop(self) -> None:
         self.cancel.set()
+        if self.activity.is_active("find"):
+            self.activity.set("find", detail="stopping after the current songs…")
         svc = self._align_service(create=False)
         if svc is not None:
             svc.stop()
             self.align_service = None
+        self.activity.done("align")
         self.v_status.set("Stopping after the current file…")
         self.btn_stop.config(state="disabled")
 
@@ -633,11 +648,21 @@ class App(tk.Tk):
         self.v_ai.set(False)                     # switched on once the add-on works
         self._log("Align: installing the GPU add-on — this takes a while…")
         self.ai_install_cancel = threading.Event()
+        self.activity.set("install", "Installing GPU add-on", 0, 100, detail="starting…", stop=self._ai_install_stop)
+        self.btn_start.config(state="disabled")            # Find waits until the install ends
+        last = {"t": 0.0, "f": -1.0}
+
+        def progress(frac, title, detail):
+            now = time.monotonic()
+            if frac >= 1.0 or abs(frac - last["f"]) >= 0.002 or now - last["t"] > 0.5:
+                last["t"], last["f"] = now, frac
+                self.events.put({"type": "ai_install_progress", "frac": frac, "title": title, "detail": detail})
 
         def work():
             ok = False
             try:
-                ok = ai_align.install(lambda t: self.events.put({"type": "log", "text": t}), self.ai_install_cancel)
+                ok = ai_align.install(lambda t: self.events.put({"type": "log", "text": t}), self.ai_install_cancel,
+                                      progress)
             except Exception as e:
                 self.events.put({"type": "log", "text": f"Align: install failed: {type(e).__name__}: {e}"})
             self.events.put({"type": "ai_installed", "ok": ok})
@@ -667,6 +692,7 @@ class App(tk.Tk):
         n = self._align_service().submit(paths, force=force)
         if n:
             self.btn_stop.config(state="normal")
+            self._align_activity()
         return n
 
     def align_paths(self, paths: list[str] | None = None, everything: bool = True) -> None:
@@ -683,6 +709,8 @@ class App(tk.Tk):
         waiting = svc.pending() if svc is not None else 0
         if t == "align_progress":
             name = display_path(e["path"])
+            self.review.set_op(e["path"], "align", {"aligned": "done", "rejected": "skip", "error": "fail"}.get(
+                e["status"], "skip"))
             self.v_status.set(f"Aligning on the GPU · {svc.done if svc else 0} done"
                               + (f" · {waiting} waiting" if waiting else ""))
             if e["status"] == "aligned":
@@ -783,6 +811,7 @@ class App(tk.Tk):
                 else:
                     self.btn_stop.config(state="disabled")
                 self._log("Align: run cancelled.")
+            self._align_activity()
         theme.hint(ttk.Button(row, text="Ignore and keep aligning", command=lambda: choose("ignore"),
                               style="Accent.TButton" if theme._state["sv"] else "TButton"),
                    "Skip the song that failed and align the waiting ones (the aligner is restarted).").pack(
@@ -1063,10 +1092,13 @@ class App(tk.Tk):
         self._log(text)
 
     def _log(self, text: str) -> None:
-        """Queue a line for the activity log; lines are written in one go per batch of events."""
+        """Queue a line for the activity log; lines are written in one go per batch of events.
+        Each line gets the time it was logged (taken here, so batching doesn't shift it)."""
         buf = getattr(self, "_log_buf", None)
         if buf is None:
             buf = self._log_buf = []
+        if text:
+            text = time.strftime("%H:%M:%S  ") + text
         buf.append(text)
         if len(buf) == 1:
             self.after_idle(self._flush_log)
@@ -1099,8 +1131,126 @@ class App(tk.Tk):
             pass
         self.after(100, self._poll)
 
+    def _track_activity(self, e: dict) -> None:
+        """Keep the header's activity rows in step with every operation that reports progress."""
+        a, t = self.activity, e["type"]
+        if t == "scanning":
+            a.set("find", "Finding lyrics", None, detail=f"scanning… {e['found']} files", stop=self._stop)
+        elif t == "scan":
+            n = e["total"]
+            a.set("find", "Finding lyrics", 0, max(1, n), detail=f"0 of {n}", stop=self._stop)
+        elif t == "result":
+            a.set("find", "Finding lyrics", e["done"], max(1, e["total"]), detail=f"{e['done']} of {e['total']}",
+                  stop=self._stop)
+        elif t in ("done", "fatal"):
+            a.done("find")
+            self.review.clear_busy("find")
+        elif t in ("apply_start", "restore_start"):
+            title = "Saving lyrics" if t == "apply_start" else "Restoring originals"
+            a.set("apply", title, 0, max(1, e["total"]), detail=f"0 of {e['total']}", stop=self._apply_stop)
+        elif t in ("apply_progress", "restore_progress"):
+            a.set("apply", value=e["done"], maximum=max(1, e["total"]), detail=f"{e['done']} of {e['total']}")
+        elif t in ("apply_done", "restore_done", "apply_fatal"):
+            a.done("apply")
+            self.review.clear_busy("save")
+        elif t == "ai_install_progress":
+            a.set("install", "Installing GPU add-on", round(e["frac"] * 100, 1), 100,
+                  detail=e.get("detail") or e.get("title") or "", stop=self._ai_install_stop)
+        elif t == "ai_installed":
+            a.done("install")
+        elif t in ("align_progress", "align_error", "align_idle"):
+            self._align_activity()
+        elif t == "align_raw":
+            a.done("autoalign")
+        elif t == "review_loaded":
+            a.done("load")
+        elif t == "review_lrclib":
+            a.done("search")
+
+    def _align_activity(self) -> None:
+        svc = self._align_service(create=False)
+        if svc is None:
+            self.activity.done("align")
+            return
+        finding = bool(self.worker and self.worker.is_alive())
+        waiting = svc.pending()
+        busy, paused = bool(getattr(svc, "busy", False)), bool(getattr(svc, "paused", False))
+        total = svc.done + waiting + (1 if busy else 0)
+        if not total and not paused:
+            if finding:
+                self.activity.set("align", "Aligning on the GPU", None, detail="waiting for songs…",
+                                  stop=self._align_stop)
+            else:
+                self.activity.done("align")
+            return
+        detail = f"{svc.done} of {total}" + (" · paused" if paused else "")
+        self.activity.set("align", "Aligning on the GPU", svc.done, max(1, total), detail=detail,
+                          stop=self._align_stop)
+
+    def _align_stop(self) -> None:
+        svc = self._align_service(create=False)
+        if svc is not None:
+            svc.stop()
+        self.align_service = None
+        self.activity.done("align")
+        self.after(200, lambda: self.review.clear_busy("align"))
+        if getattr(self, "_align_dialog", None) is not None:
+            try:
+                self._align_dialog.destroy()
+            except tk.TclError:
+                pass
+            self._align_dialog = None
+        self._log("Align: stopped. Songs not aligned yet keep their found lyrics.")
+
+    def _ai_install_stop(self) -> None:
+        ev = getattr(self, "ai_install_cancel", None)
+        if ev is not None:
+            ev.set()
+        self.activity.set("install", detail="stopping…")
+
+    def _ensure_ai(self) -> bool:
+        """True when GPU alignment is switched on; otherwise offers to switch it on (which may install)."""
+        if self.settings.ai_align:
+            return True
+        if self.activity.is_active("install"):
+            messagebox.showinfo(APP_TITLE, "The GPU add-on is still installing (see the progress at the top).")
+            return False
+        if not messagebox.askyesno(APP_TITLE, "Aligning uses the NVIDIA GPU add-on (Align low-confidence lyrics). "
+                                              "Switch it on?"):
+            return False
+        self.v_ai.set(True)
+        self._ai_toggled()
+        return bool(self.settings.ai_align)
+
+    def align_command(self, which: str) -> None:
+        """The Align (GPU) buttons: "low" = the low-confidence songs in the list, "selected" = the
+        songs selected in Review & player."""
+        from . import ai_align
+
+        if not self._ensure_ai():
+            return
+        if which == "selected":
+            songs = self.review.selected_songs()
+            if not songs:
+                messagebox.showinfo(APP_TITLE, "Select songs in the Review & player list first.")
+                return
+            n = self.queue_alignment(songs, force=True)
+        else:
+            paths = ai_align.pick_low_confidence(self.settings, self._session_paths())
+            if not paths:
+                messagebox.showinfo(APP_TITLE, "No songs in the list are below High confidence "
+                                               f"({self.settings.confident_threshold}%) or Good fit "
+                                               f"({self.settings.confident_fit}%) with lyrics still to save.")
+                return
+            n = self.queue_alignment(paths)
+        self._log(f"Align: {n} song(s) queued for the GPU.")
+
     def _handle(self, e: dict) -> None:
         t = e["type"]
+        try:
+            self._track_activity(e)
+        except tk.TclError:
+            pass
         if t == "log":
             self._log(e["text"])
         elif t == "scanning":
@@ -1108,11 +1258,21 @@ class App(tk.Tk):
         elif t == "scan":
             self.progress.stop()
             self.progress.config(mode="determinate", maximum=max(1, e["total"]), value=0)
+        elif t == "file_start":
+            self.review.set_op(e["path"], "find", "busy",
+                               None if state_key(e["path"]) in self.review.rows else "searching")
+        elif t == "align_song_start":
+            self.review.set_op(e["path"], "align", "busy")
+        elif t in ("apply_file_start", "restore_file_start"):
+            self.review.set_op(e["path"], "save", "busy")
         elif t == "align_raw":
             self.review.align_result(e)
         elif t in ("align_progress", "align_error", "align_idle"):
             self._align_event(e)
         elif t == "ai_installed":
+            if not (self.worker and self.worker.is_alive()) and not (self.apply_worker and
+                                                                     self.apply_worker.is_alive()):
+                self.btn_start.config(state="normal")
             if e["ok"]:
                 self._ai_set(True)
                 self._log("Align: the add-on is installed and switched on.")
@@ -1132,7 +1292,8 @@ class App(tk.Tk):
             self.v_apply.set(f"Applying {e['done']}/{e['total']}…")
             if state_key(e["path"]) in self.review.rows:
                 self.review.add_row(e["path"], e["status"] if e["status"] != "unchanged" else "already_embedded",
-                                    e["source"])
+                                    e["source"], ops={"save": {"error": "fail", "unchanged": "skip"}.get(
+                                        e["status"], "done")})
             label = STATUS_LABELS.get(e["status"], e["status"])
             self._log(f"{label}: {display_path(e['path'])}" + (f" — {e['detail']}" if e["detail"] else ""))
         elif t == "apply_done":
@@ -1153,7 +1314,9 @@ class App(tk.Tk):
             self.apply_progress.config(value=e["done"])
             self.v_apply.set(f"Restoring {e['done']}/{e['total']}…")
             if e["status"] in ("restored", "unchanged") and state_key(e["path"]) in self.review.rows:
-                self.review.add_row(e["path"], "restored")
+                self.review.add_row(e["path"], "restored", ops={"save": ""})
+            elif state_key(e["path"]) in self.review.rows:
+                self.review.set_op(e["path"], "save", "fail" if e["status"] == "error" else "")
             if e["status"] in ("restored", "error"):
                 self._log(f"{'Restored' if e['status'] == 'restored' else 'Error'}: {display_path(e['path'])}"
                           + (f" — {e['detail']}" if e["detail"] else ""))
@@ -1176,7 +1339,8 @@ class App(tk.Tk):
             # cached = finished in an earlier run: still listed for review (its detail holds the status)
             self.review.add_row(r.path, r.detail if r.status == "cached" else r.status, r.source,
                                 m.artist if m else "", m.title if m else "", r.local, r.online, r.choice,
-                                m.album if m else "", r.conf_local, r.conf_online, r.fit_local, r.fit_online)
+                                m.album if m else "", r.conf_local, r.conf_online, r.fit_local, r.fit_online,
+                                ops={"find": "fail" if r.status == "error" else "done"})
             if not self._apply_bar_shown:
                 self.show_apply_bar()
             if r.status == "proposed" and not getattr(self, "_switched_to_review", True):

@@ -275,6 +275,7 @@ class Engine:
     def _file_job(self, path, pre, match, note):
         if self.cancel.is_set():
             return "skip", None
+        self.emit({"type": "file_start", "path": path})          # the app marks the song as in progress
         cache = {path: pre} if pre is not None else {}
 
         def open_tf(p):

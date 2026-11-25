@@ -114,10 +114,25 @@ def refresh_worker() -> None:
         pass
 
 
-def install(log, cancel: threading.Event | None = None) -> bool:
+_PROGRESS_RE = re.compile(r"^Progress (\d+) of (\d+)")
+_DOWNLOAD_RE = re.compile(r"^\s*Downloading (\S+?)(?:-\d[^ ]*)?(?:\.whl|\.tar\.gz)?(?: \(([^)]+)\))?\s*$")
+
+
+def _fmt_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def install(log, cancel: threading.Event | None = None, progress=None) -> bool:
     """Build the add-on environment: about 3 GB of downloads (PyTorch with CUDA, Whisper, Demucs).
-    The speech and separation models (~1.6 GB more) download on first use. `log(str)` gets progress."""
+    The speech and separation models (~1.6 GB more) download on first use. `log(str)` gets progress
+    lines; `progress(fraction 0-1, title, detail)` drives a progress bar. Stops (returns False) as soon
+    as `cancel` is set."""
     cancel = cancel or threading.Event()
+    progress = progress or (lambda f, t, d: None)
     py = find_system_python()
     if py is None:
         log("Align: Python 3.10, 3.11 or 3.12 is needed to install the add-on (python.org). None was found.")
@@ -125,33 +140,36 @@ def install(log, cancel: threading.Event | None = None) -> bool:
     d = addon_dir()
     os.makedirs(d, exist_ok=True)
     venv = os.path.join(d, "venv")
+    raw = ["--progress-bar", "raw"]
+    # (title, command, share of the bar)
     steps = [
-        ("Creating the add-on environment", py + ["-m", "venv", venv]),
-        ("Updating pip", [addon_python(), "-m", "pip", "install", "-U", "pip"]),
+        ("Creating the add-on environment", py + ["-m", "venv", venv], 0.02),
+        ("Updating pip", [addon_python(), "-m", "pip", "install", "-U", "pip"], 0.03),
         ("Installing PyTorch with CUDA (about 2.5 GB)", [addon_python(), "-m", "pip", "install", "torch",
-                                                         "--index-url", TORCH_INDEX]),
-        ("Installing Whisper, stable-ts and Demucs", [addon_python(), "-m", "pip", "install"] + PACKAGES),
+                                                         "--index-url", TORCH_INDEX] + raw, 0.75),
+        ("Installing Whisper, stable-ts and Demucs", [addon_python(), "-m", "pip", "install"] + PACKAGES + raw,
+         0.18),
     ]
-    for title, cmd in steps:
+    done = 0.0
+    for title, cmd, share in steps:
         if cancel.is_set():
             log("Align: installation stopped.")
             return False
         log(f"Align: {title}…")
-        try:
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                 creationflags=_NO_WINDOW)
-        except OSError as e:
-            log(f"Align: {title} failed: {e}")
+        progress(done, title, "")
+        rc, out = _run_step(cmd, log, cancel, lambda f, det, base=done, sh=share, t=title: progress(
+            base + sh * max(0.0, min(1.0, f)), t, det))
+        if rc != 0 and "--progress-bar" in cmd and "invalid choice" in out:       # older pip: no raw bars
+            rc, out = _run_step([c for c in cmd if c not in raw], log, cancel, lambda f, det: None)
+        if cancel.is_set():
+            log("Align: installation stopped.")
             return False
-        for line in p.stdout:                                     # type: ignore[union-attr]
-            line = line.rstrip()
-            if line and not line.startswith(("  ", "Requirement already")):
-                log("    " + line[:200])
-            if cancel.is_set():
-                p.kill()
-        if p.wait() != 0:
-            log(f"Align: {title} failed (exit code {p.returncode}).")
+        if rc != 0:
+            log(f"Align: {title} failed (exit code {rc}).")
             return False
+        done += share
+        progress(done, title, "done")
+    progress(0.99, "Checking the GPU", "")
     shutil.copyfile(worker_source(), _installed_worker())
     with open(os.path.join(d, "installed.json"), "w", encoding="utf-8") as fh:
         json.dump({"python": " ".join(py), "torch_index": TORCH_INDEX, "packages": PACKAGES}, fh)
@@ -159,8 +177,48 @@ def install(log, cancel: threading.Event | None = None) -> bool:
     if not info.get("ok"):
         log(f"Align: the add-on installed, but its check failed: {info.get('error', info)}")
         return False
+    progress(1.0, "Ready", info.get("device") or "")
     log(f"Align: ready — {info.get('device')} ({info.get('vram_gb')} GB), PyTorch {info.get('torch')}.")
     return True
+
+
+def _run_step(cmd, log, cancel, step_progress) -> tuple[int, str]:
+    """Run one install command; feed pip's raw progress lines to step_progress(fraction, detail).
+    The command is killed as soon as `cancel` is set."""
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                             creationflags=_NO_WINDOW)
+    except OSError as e:
+        log(f"    {e}")
+        return 1, str(e)
+
+    def watch():                                  # stop promptly even while pip is quiet
+        while p.poll() is None:
+            if cancel.wait(0.5):
+                if p.poll() is None:
+                    p.kill()
+                return
+    threading.Thread(target=watch, daemon=True).start()
+    tail: list[str] = []
+    current = ""
+    for line in p.stdout:                                     # type: ignore[union-attr]
+        line = line.rstrip()
+        m = _PROGRESS_RE.match(line)
+        if m:
+            got, total = int(m.group(1)), int(m.group(2))
+            if total:
+                step_progress(got / total, f"{current}{_fmt_bytes(got)} of {_fmt_bytes(total)}")
+            continue
+        md = _DOWNLOAD_RE.match(line)
+        if md and not line.rstrip().endswith(".metadata"):
+            current = f"{md.group(1)}: "
+        tail = (tail + [line])[-20:]
+        if line and not line.startswith(("  ", "Requirement already")):
+            log("    " + line[:200])
+    rc = p.wait()
+    if cancel.is_set():
+        return 1, ""
+    return rc, "\n".join(tail)
 
 
 # ------------------------------------------------------------------ worker process
@@ -644,6 +702,7 @@ class AlignService:
                     c, f = st.pending_scores().get(path, (None, None))
                     if not is_low_confidence(s, c, f):
                         continue
+                self._emit({"type": "align_song_start", "path": path})
                 try:
                     if nvidia_gpu() is None:
                         raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")

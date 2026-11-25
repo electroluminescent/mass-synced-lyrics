@@ -63,6 +63,17 @@ As soon as **Find lyrics** finds the first song with new lyrics, the app switche
 
   Songs opened in the player are always checked against the audio. **Check lyrics against the audio (slower)** on the Find lyrics tab does it for every song while finding. The New pane shows each candidate's fit and what lowered it.
 
+**Progress columns:**
+- **Find**, **Align** and **Save** show ⟳ while a song is being worked on, then:
+  - ✓ done;
+  - – nothing to do, or kept as found;
+  - ✗ error.
+- Group rows show how many are done.
+- Songs being worked on are highlighted, and stay visible whatever the filters.
+- Every operation still running also has a row at the top of the window, with a progress bar and **Stop**.
+
+**Columns:** right-click a column header, or use **Columns** under the list, to show or hide columns. **Right-click → Remove from the list** (or the Delete key) takes songs, albums, artists or folders out of the list without touching their files. Starting **Find lyrics** begins a new list.
+
 Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hides songs below a chosen % (songs without a score stay listed). The other sets the level that counts as **High confidence** or **Good fit**, the same setting as on the Find lyrics tab. The box at the top left arranges the list by **Artist ▸ Album** (from the tags) or by **Folders** on disk. Right-click a song for **Open file location**, or a group row for **Open folder**.
 
 **Filters** (above the list): **Lyrics found** shows only songs with lyrics to write. It is on by default; the **List only songs with lyrics found** switch on the Find lyrics tab sets the default for each run. **Hide saved** hides songs already written or up to date. **Hide low confidence** hides songs below the **High confidence** (95 %) or **Good fit** (80 %) level set on the Find lyrics tab.
@@ -94,6 +105,8 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 
 - Under each pane is a button: **Keep current** or **Use new**. The one Apply will use is **green with a ✓**.
 - *Reset to default* removes your choice for the song.
+
+**The lyric panes:** the song's **Current** lyrics are collapsed by default; **▸ Current** shows them beside the new ones and **◂ Hide** collapses them again (remembered). While they're hidden, **Keep current** sits beside **Use new**.
 
 **Timing of the new lyrics** (the controls under the waveforms):
 

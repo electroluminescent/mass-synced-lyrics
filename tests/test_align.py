@@ -231,3 +231,27 @@ def test_service_skips_songs_that_became_confident(settings, monkeypatch, tmp_pa
     assert _wait(lambda: any(e.get("status") == "aligned" for e in events))
     svc.stop()
     svc.join(5)
+
+
+def test_install_step_reports_pip_progress_and_stops_on_cancel(tmp_path):
+    import threading
+    import time
+    script = tmp_path / "fakepip.py"
+    script.write_text("import sys, time\n"
+                      "print('Collecting torch')\n"
+                      "print('Downloading torch-2.9.0-cp312-cp312-win_amd64.whl (2.5 GB)')\n"
+                      "for i in range(0, 101, 25):\n"
+                      "    print(f'Progress {i * 1000} of 100000', flush=True)\n"
+                      "print('Successfully installed torch')\n"
+                      "if len(sys.argv) > 1: time.sleep(30)\n", encoding="utf-8")
+    seen, logged = [], []
+    rc, _ = ai_align._run_step([sys.executable, str(script)], logged.append, threading.Event(),
+                               lambda f, d: seen.append((round(f, 2), d)))
+    assert rc == 0 and [f for f, _ in seen] == [0.0, 0.25, 0.5, 0.75, 1.0]
+    assert seen[-1][1] == "torch: 98 KB of 98 KB"
+    assert any("Successfully installed" in x for x in logged)
+    cancel = threading.Event()
+    t0 = time.monotonic()
+    threading.Timer(0.5, cancel.set).start()
+    rc, _ = ai_align._run_step([sys.executable, str(script), "slow"], logged.append, cancel, lambda f, d: None)
+    assert rc != 0 and time.monotonic() - t0 < 10                 # killed, not waited out

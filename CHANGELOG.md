@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.0
+- **Progress for everything still running:** a row at the top of the window for each operation, with
+  a progress bar, a count and a Stop button. It covers Find lyrics, saving or restoring, GPU aligning,
+  installing the GPU add-on, Auto-align, loading a song and LRCLIB searches.
+- **Progress in the song list:** new **Find**, **Align** and **Save** columns show ⟳ while a song is
+  being worked on, then ✓ done, – nothing to do / kept as found, or ✗ error. Group rows show counts.
+  Songs in progress are highlighted, and stay visible whatever the filters.
+- **Show or hide columns:** right-click a column header, or use **Columns** under the list. Remembered.
+- **Align buttons:** **Align (GPU)** under the song list (the low-confidence songs, or the selected
+  ones) and **Align low-confidence (GPU)** on the Find lyrics tab. Both offer to switch alignment on.
+- **Installing the GPU add-on** shows real download progress (from pip). **Find lyrics** waits until
+  the install finishes or is stopped.
+- **Current lyrics are collapsible**, collapsed by default (remembered). While they're hidden, **Keep
+  current** sits beside **Use new**. The New header, lyric choice and **▸ Current** share one row.
+- **The activity log shows the time** of every line. The time is taken when the line is logged, so it
+  adds no delay.
+- **Starting Find lyrics clears the song list** from the previous run.
+- **Remove from the list:** right-click a song, album, artist or folder (or press Delete) to take it
+  out of the list. Files and choices are untouched, and Apply leaves it out.
+- A song that can't be opened in the player (moved or deleted) shows a note instead of a blocking
+  error box.
+
 ## 1.3.0
 - **Auto-align (GPU)** button in Review & player (uses the NVIDIA add-on; offers to switch it on). It
   aligns the lyrics in the New pane to this song's vocals.

@@ -45,7 +45,7 @@ SHORT_STATUS = {
     "has_synced": "Has lyrics", "not_found": "Not found", "no_synced": "Plain only online",
     "instrumental": "Instrumental", "no_metadata": "No tags", "ambiguous": "Ambiguous", "error": "Error",
     "unsupported": "Unsupported", "locked": "Your choice", "chosen": "Your choice", "unchanged": "Unchanged",
-    "rejected": "Rejected", "restored": "Restored", "aligned": "Aligned", "": "",
+    "rejected": "Rejected", "restored": "Restored", "aligned": "Aligned", "searching": "Looking up…", "": "",
 }
 CHOICE_TEXT = {"local": "Local", "online": "Online", "keep": "Don't change", "custom": "Custom",
                "remove": "Remove lyrics", "": ""}
@@ -64,25 +64,33 @@ LEGEND_HINTS = {
 }
 COLUMN_HINTS = {
     "#0": "Songs by Artist ▸ Album or by folder (switch with the box above). Ctrl/Shift+click selects several "
-          "songs; a group row counts as all its songs. Right-click for Save now, sources, Reset, Restore original "
-          "and opening the file's location.",
-    "#1": "What happened to the song so far.",
-    "#2": "Lyrics found locally: a sidecar .lrc beside the song, your collection, or embedded lyrics.",
-    "#3": "Result of the LRCLIB lookup: found, plain lyrics only, instrumental, or not found.",
-    "#4": "What Apply will do. Click a Choice cell to cycle Local → Online → Don't change. On an artist/album "
+          "songs; a group row counts as all its songs. Right-click for Save now, sources, Reset, Restore original, "
+          "opening the file's location and Remove from the list (also the Delete key).",
+    "status": "What happened to the song so far.",
+    "local": "Lyrics found locally: a sidecar .lrc beside the song, your collection, or embedded lyrics.",
+    "online": "Result of the LRCLIB lookup: found, plain lyrics only, instrumental, or not found.",
+    "choice": "What Apply will do. Click a Choice cell to cycle Local → Online → Don't change. On an artist/album "
           "row or a multi-selection it changes all of them.",
-    "#5": "How sure it is that the lyrics in Choice belong to this song (100% = exact title, artist, album "
+    "match": "How sure it is that the lyrics in Choice belong to this song (100% = exact title, artist, album "
           "and length). Click the header to filter by it.",
-    "#6": "How well the lyrics in Choice fit this recording: its length, lines past the end, how the lines "
+    "fit": "How well the lyrics in Choice fit this recording: its length, lines past the end, how the lines "
           "spread over the song and, once the audio has been checked, lines that start on silence. "
           "Click the header to filter by it.",
+    "find": "Find lyrics: ⟳ being looked up now · ✓ done · ✗ error.",
+    "align": "GPU alignment: ⟳ aligning now · ✓ re-timed · – heard too little, kept as found · ✗ error.",
+    "save": "Saving (Apply / Save now): ⟳ writing now · ✓ written · – already up to date · ✗ error.",
 }
+COLUMNS = (("status", 70, "Status"), ("find", 40, "Find"), ("align", 44, "Align"), ("save", 40, "Save"),
+           ("choice", 96, "Choice ⟳"), ("match", 56, "Match"), ("fit", 48, "Fit"),
+           ("local", 58, "Local"), ("online", 66, "Online"))
+OPS = ("find", "align", "save")
+OP_MARK = {"busy": "⟳", "done": "✓", "skip": "–", "fail": "✗", "": ""}
 
 VIEWS = {"artist": "Artist ▸ Album", "folder": "Folders"}
 VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ Song"}
 
 ROW_KEYS = ("status", "source", "artist", "title", "local", "online", "choice", "album", "conf_local",
-            "conf_online", "fit_local", "fit_online")
+            "conf_online", "fit_local", "fit_online", "op_find", "op_align", "op_save")
 SCORE_COLS = {"match": ("Match", "list_min_match"), "fit": ("Fit", "list_min_fit")}
 FOUND_STATUSES = {"proposed", "chosen", "locked", "aligned"}
 
@@ -187,6 +195,10 @@ class Tooltip:
 
 def _blank_row() -> dict:
     return {k: (None if k.startswith(("conf_", "fit_")) else "") for k in ROW_KEYS}
+
+
+def _busy(r: dict) -> bool:
+    return any(r.get("op_" + op) == "busy" for op in OPS)
 
 
 class ReviewTab(ttk.Frame):
@@ -297,11 +309,12 @@ class ReviewTab(ttk.Frame):
                 side="left", padx=(0, 10))
         tf = ttk.Frame(left)
         tf.pack(fill="both", expand=True, pady=4)
-        cols = ("status", "local", "online", "choice", "match", "fit")
+        cols = tuple(c for c, _, _ in COLUMNS)
         self.min_score = {k: snap5(getattr(st0, attr, 0) or 0) for k, (_, attr) in SCORE_COLS.items()}
         self._score_popup = None
         self.tree = ttk.Treeview(tf, columns=cols, show="tree headings", selectmode="extended")
         self.tree.heading("#0", text=VIEW_HEADINGS[self._view()])
+        self.tree.tag_configure("busy")             # created first so it outranks the row colours
         self.group_dirs: dict[str, str] = {}      # group row → its folder on disk
         # Group-row totals are kept per group and refreshed once per batch of changes (bottom-up), and the
         # "shown" count is tracked incrementally, so adding a song costs the same with 50 or 50,000 listed.
@@ -311,17 +324,18 @@ class ReviewTab(ttk.Frame):
         self._shown: set[str] = set()
         self._search_job = None
         self.tree.column("#0", width=180, minwidth=140, stretch=True)
-        for col, w, label in (("status", 70, "Status"), ("local", 58, "Local"),
-                              ("online", 66, "Online"), ("choice", 96, "Choice ⟳"), ("match", 56, "Match"),
-                              ("fit", 48, "Fit")):
+        for col, w, label in COLUMNS:
             self.tree.heading(col, text=label)
-            self.tree.column(col, width=w, minwidth=40, stretch=False)
+            self.tree.column(col, width=w, minwidth=34, stretch=False, anchor="center" if col in OPS else "w")
+        self._apply_columns(getattr(self.app.settings, "list_columns", None) or [c for c, _, _ in COLUMNS],
+                            save=False)
         for col in SCORE_COLS:
             self.tree.heading(col, command=lambda c=col: self._score_filter_popup(c))
             self._score_heading(col)
         theme.register(self, "callback", fn=self._restyle)
         self.tree.bind("<Button-1>", self._tree_click, add="+")
         self.tree.bind("<Button-3>", self._tree_menu)
+        self.tree.bind("<Delete>", self._delete_key)
         self._head_tip = Tooltip(self.tree)
         self.tree.bind("<Motion>", self._tree_motion, add="+")
         self.tree.bind("<Leave>", lambda e: self._head_tip.hide(), add="+")
@@ -338,6 +352,18 @@ class ReviewTab(ttk.Frame):
         bf.pack(fill="x")
         theme.hint(ttk.Button(bf, text="Load earlier results", command=self.load_earlier), 'Add every song from earlier runs to the list.').pack(side="left")
         theme.hint(ttk.Button(bf, text="Open file…", command=self._open_file), 'Open any song in the player.').pack(side="left", padx=6)
+        mb = ttk.Menubutton(bf, text="Align (GPU)")
+        menu = theme.register(tk.Menu(mb, tearoff=0), "menu")
+        menu.add_command(label="Align low-confidence songs in the list",
+                         command=lambda: self.app.align_command("low"))
+        menu.add_command(label="Align selected songs", command=lambda: self.app.align_command("selected"))
+        mb["menu"] = menu
+        theme.hint(mb, "Align lyrics to the vocals on the NVIDIA GPU: the low-confidence songs in this list, or the "
+                       "selected songs. Progress shows at the top of the window.").pack(side="left")
+        cb = ttk.Menubutton(bf, text="Columns")
+        cb.bind("<Button-1>", lambda e: cb.configure(menu=self._columns_menu()), add="+")
+        cb.configure(menu=self._columns_menu())
+        theme.hint(cb, "Show or hide columns (also: right-click a column header).").pack(side="left", padx=6)
         self.v_count = tk.StringVar(value="0 files")
         ttk.Label(bf, textvariable=self.v_count).pack(side="right")
 
@@ -455,16 +481,28 @@ class ReviewTab(ttk.Frame):
         lp = theme.paned(right)
         lp.grid(row=r, column=0, sticky="nsew"); r += 1
         lf = theme.card(lp, padding=(10, 8))
-        self.lbl_cur = ttk.Label(lf, text="Current (embedded)", style="Section.TLabel")
-        self.lbl_cur.pack(anchor="w", pady=(0, 6))
+        cs_ = "Card.TFrame" if theme._state["sv"] else "TFrame"
+        lh = ttk.Frame(lf, style=cs_)
+        lh.pack(fill="x", pady=(0, 6))
+        self.lbl_cur = ttk.Label(lh, text="Current (embedded)", style="Section.TLabel")
+        self.lbl_cur.pack(side="left")
+        theme.hint(ttk.Button(lh, text="◂ Hide", command=lambda: self.set_current_shown(False), width=7),
+                   "Hide the current lyrics to give the new ones the whole width.").pack(side="right")
         nf = theme.card(lp, padding=(10, 8))
-        ttk.Label(nf, text="New", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        nh = ttk.Frame(nf, style=cs_)
+        nh.pack(fill="x", pady=(0, 6))
+        self.btn_show_cur = theme.hint(ttk.Button(nh, text="▸ Current", command=lambda: self.set_current_shown(True),
+                                                  width=10),
+                                       "Show the song's current lyrics beside the new ones.")
+        ttk.Label(nh, text="New", style="Section.TLabel").pack(side="left", padx=(0, 8))
+        self._new_head = nh
         lp.add(lf, minsize=180, stretch="always")
         lp.add(nf, minsize=180, stretch="always")
+        self._lf, self._nf = lf, nf
         self._lyrics_paned = lp
         lp.bind("<Map>", lambda e: self.after(30, self._even_lyrics_split), add="+")
-        self.cmb_cand = theme.hint(ttk.Combobox(nf, state="readonly"), 'Lyrics to compare and choose from: what Find found, sidecars, collection, LRCLIB, the current lyrics (to re-time), the originals, or none.')
-        self.cmb_cand.pack(fill="x", pady=(0, 2))
+        self.cmb_cand = theme.hint(ttk.Combobox(nh, state="readonly"), 'Lyrics to compare and choose from: what Find found, sidecars, collection, LRCLIB, the current lyrics (to re-time), the originals, or none.')
+        self.cmb_cand.pack(side="left", fill="x", expand=True)
         self.v_fit = tk.StringVar()
         fit_lbl = theme.hint(ttk.Label(nf, textvariable=self.v_fit, style="Caption.TLabel", wraplength=420,
                                        justify="left"),
@@ -473,7 +511,7 @@ class ReviewTab(ttk.Frame):
 
         def show_fit(*_):                        # only when something lowered the fit
             if self.v_fit.get():
-                fit_lbl.pack(fill="x", pady=(0, 4), after=self.cmb_cand)
+                fit_lbl.pack(fill="x", pady=(0, 4), after=nh)
             else:
                 fit_lbl.pack_forget()
         self.v_fit.trace_add("write", show_fit)
@@ -485,9 +523,17 @@ class ReviewTab(ttk.Frame):
         self.btn_apply = theme.flat_button(nf, "Use new", self._apply, pady=8)
         theme.hint(self.btn_apply, "Use the lyrics shown on the right, with any timing changes. Written when you "
                                    "press Apply (or right-click the song → Save now).")
-        self.btn_apply.pack(side="bottom", fill="x", pady=(8, 0))
+        self._choice_row = ttk.Frame(nf, style=cs_)
+        self._choice_row.pack(side="bottom", fill="x", pady=(8, 0))
+        self.btn_apply.pack(in_=self._choice_row, side="right", fill="x", expand=True)
+        self.btn_apply.lift(self._choice_row)           # created before the row: keep it drawn on top
+        # while the current lyrics are hidden, their Keep current button sits beside Use new
+        self.btn_keep2 = theme.flat_button(nf, "Keep current", self._lock, pady=8)
+        theme.hint(self.btn_keep2, "Leave this song's lyrics as they are (Apply skips it, later runs too).")
+        self.btn_keep2.lift(self._choice_row)
         self.txt_cur = self._lyrics_text(lf, "cur")
         self.txt_new = self._lyrics_text(nf, "new")
+        self.set_current_shown(bool(getattr(self.app.settings, "show_current", False)), save=False)
 
         act = ttk.Frame(right)
         act.grid(row=r, column=0, sticky="ew", pady=(6, 0)); r += 1
@@ -548,6 +594,8 @@ class ReviewTab(ttk.Frame):
                                         font=theme.font("strong") if tag == "group" else theme.font("body"))
             else:
                 self.tree.tag_configure(tag, background=bg, foreground=fg)
+        self.tree.tag_configure("busy", background="#2f4f7a" if theme.mode() == "dark" else "#cfe1ff",
+                                foreground="#ffffff" if theme.mode() == "dark" else "#0b2a52")
         for t in (getattr(self, "txt_cur", None), getattr(self, "txt_new", None)):
             if t is not None:
                 self._tag_lyrics(t)
@@ -555,8 +603,33 @@ class ReviewTab(ttk.Frame):
             self._update_choice_buttons()
             self._style_interp()
 
+    def set_current_shown(self, shown: bool, save: bool = True) -> None:
+        """Show or collapse the Current lyrics pane (collapsed by default; remembered)."""
+        lp = self._lyrics_paned
+        panes = [str(x) for x in lp.panes()]
+        if shown and str(self._lf) not in panes:
+            lp.add(self._lf, before=self._nf, minsize=180, stretch="always")
+            self._lyrics_split_done = False
+            self.after(30, self._even_lyrics_split)
+        elif not shown and str(self._lf) in panes:
+            lp.forget(self._lf)
+        if shown:
+            self.btn_show_cur.pack_forget()
+            self.btn_keep2.pack_forget()
+        else:
+            self.btn_show_cur.pack(side="left", padx=(0, 8), before=self._new_head.winfo_children()[1])
+            self.btn_keep2.pack(in_=self._choice_row, side="left", fill="x", expand=True, padx=(0, 8),
+                                before=self.btn_apply)
+        self.current_shown = shown
+        if save and getattr(self.app.settings, "show_current", None) != shown:
+            self.app.settings.show_current = shown
+            try:
+                save_settings(self.app.settings)
+            except OSError:
+                pass
+
     def _even_lyrics_split(self) -> None:
-        if getattr(self, "_lyrics_split_done", False):
+        if getattr(self, "_lyrics_split_done", False) or len(self._lyrics_paned.panes()) < 2:
             return
         w = self._lyrics_paned.winfo_width()
         if w > 50:
@@ -601,7 +674,7 @@ class ReviewTab(ttk.Frame):
                 title: str | None = None, local: str | None = None, online: str | None = None,
                 choice: str | None = None, album: str | None = None, conf_local: float | None = None,
                 conf_online: float | None = None, fit_local: float | None = None,
-                fit_online: float | None = None) -> None:
+                fit_online: float | None = None, ops: dict | None = None) -> None:
         """Add or update a song row; None keeps the current value."""
         path = state_key(path)
         row = self.rows.get(path) or _blank_row()
@@ -611,6 +684,8 @@ class ReviewTab(ttk.Frame):
                      ("fit_local", fit_local), ("fit_online", fit_online)):
             if v is not None:
                 row[k] = v
+        for op, v in (ops or {}).items():
+            row["op_" + op] = v
         self.rows[path] = row
         if hasattr(self.app, "session_changed"):
             self.app.session_changed()
@@ -772,6 +847,8 @@ class ReviewTab(ttk.Frame):
                 continue
             count = n_local = n_online = low = poor = 0
             choices: set = set()
+            op_done = {op: 0 for op in OPS}
+            op_busy = {op: 0 for op in OPS}
             for c in self.tree.get_children(node):
                 if c.startswith("grp:"):
                     st = self._group_stats.get(c)
@@ -779,6 +856,9 @@ class ReviewTab(ttk.Frame):
                         continue
                     count += st[0]; n_local += st[1]; n_online += st[2]; low += st[4]; poor += st[5]
                     choices |= st[3]
+                    for op in OPS:
+                        op_done[op] += st[6][op]
+                        op_busy[op] += st[7][op]
                     continue
                 r = self.rows.get(c)
                 if r is None:
@@ -790,22 +870,31 @@ class ReviewTab(ttk.Frame):
                 cv, fv = self.row_confidence(r), self.row_fit(r)
                 low += 1 if cv is not None and cv < thr_c else 0
                 poor += 1 if fv is not None and fv < thr_f else 0
+                for op in OPS:
+                    v = r.get("op_" + op, "")
+                    op_done[op] += 1 if v == "done" else 0
+                    op_busy[op] += 1 if v == "busy" else 0
             if not count:
                 self.tree.delete(node)
                 self._group_stats.pop(node, None)
                 self.group_dirs.pop(node, None)
                 continue
-            self._group_stats[node] = (count, n_local, n_online, frozenset(choices), low, poor)
+            self._group_stats[node] = (count, n_local, n_online, frozenset(choices), low, poor, op_done, op_busy)
             choice = CHOICE_TEXT.get(next(iter(choices)), "") if len(choices) == 1 else "mixed"
-            self.tree.item(node, values=(f"{count} song{'s' if count != 1 else ''}",
-                                         f"{n_local} local" if n_local else "—",
-                                         f"{n_online} found" if n_online else "—",
-                                         f"⟳ {choice}" if choice else "",
-                                         f"{low} low" if low else "",
-                                         f"{poor} poor" if poor else ""))
+            vals = {"status": f"{count} song{'s' if count != 1 else ''}",
+                    "local": f"{n_local} local" if n_local else "—",
+                    "online": f"{n_online} found" if n_online else "—",
+                    "choice": f"⟳ {choice}" if choice else "",
+                    "match": f"{low} low" if low else "", "fit": f"{poor} poor" if poor else ""}
+            for op in OPS:
+                vals[op] = "⟳" if op_busy[op] else (f"{op_done[op]}✓" if op_done[op] else "")
+            self.tree.item(node, values=tuple(vals[c] for c, _, _ in COLUMNS))
 
     def _update_count(self) -> None:
         self.v_count.set(f"{len(self._shown)} shown / {len(self.rows)} songs")
+
+    def _row_tags(self, row: dict) -> tuple:
+        return (self._row_tag(row), "busy") if _busy(row) else (self._row_tag(row),)
 
     def _row_tag(self, row: dict) -> str:
         if row["status"] in PROBLEM_STATUSES:
@@ -825,7 +914,11 @@ class ReviewTab(ttk.Frame):
         else:
             match = "—" if conf is None else f"{conf:.0f}%"
             fitv = "—" if fit is None else f"{fit:.0f}%"
-        return (status, r["local"] or "—", r["online"] or "—", f"⟳ {choice}" if choice else "", match, fitv)
+        vals = {"status": status, "local": r["local"] or "—", "online": r["online"] or "—",
+                "choice": f"⟳ {choice}" if choice else "", "match": match, "fit": fitv}
+        for op in OPS:
+            vals[op] = OP_MARK.get(r.get("op_" + op, ""), "")
+        return tuple(vals[c] for c, _, _ in COLUMNS)
 
     @staticmethod
     def _by_choice(r: dict, prefix: str) -> float | None:
@@ -975,8 +1068,8 @@ class ReviewTab(ttk.Frame):
         top.bind("<Escape>", lambda e: close())
         top.bind("<Return>", lambda e: close())
         try:
-            bbox_x = sum(int(self.tree.column(c, "width")) for c in ("#0",) + self.tree["columns"][
-                :list(self.tree["columns"]).index(col)])
+            shown = self._shown_columns()
+            bbox_x = sum(int(self.tree.column(c, "width")) for c in ["#0"] + shown[:shown.index(col)])
         except (tk.TclError, ValueError):
             bbox_x = 0
         x = self.tree.winfo_rootx() + max(0, min(bbox_x, self.tree.winfo_width() - 270))
@@ -1018,12 +1111,111 @@ class ReviewTab(ttk.Frame):
         if hasattr(self.app, "session_changed"):
             self.app.session_changed()
 
+    # -- columns: show / hide
+    def _shown_columns(self) -> list[str]:
+        dc = self.tree["displaycolumns"]
+        if isinstance(dc, str):
+            dc = (dc,)
+        dc = [str(c) for c in dc]
+        return [c for c, _, _ in COLUMNS] if dc in (["#all"], []) else dc
+
+    def _column_at(self, x: int) -> str:
+        """Column id under x (display positions shift when columns are hidden)."""
+        ident = self.tree.identify_column(x)
+        if ident == "#0":
+            return "#0"
+        try:
+            return self._shown_columns()[int(ident.lstrip("#")) - 1]
+        except (ValueError, IndexError):
+            return ""
+
+    def _apply_columns(self, cols, save: bool = True) -> None:
+        order = [c for c, _, _ in COLUMNS]
+        shown = [c for c in order if c in set(cols)]
+        self.tree["displaycolumns"] = shown or ["status"]
+        if save:
+            self.app.settings.list_columns = list(shown)
+            try:
+                save_settings(self.app.settings)
+            except OSError:
+                pass
+
+    def toggle_column(self, col: str) -> None:
+        shown = self._shown_columns()
+        self._apply_columns([c for c in shown if c != col] if col in shown else shown + [col])
+
+    def _columns_menu(self) -> tk.Menu:
+        m = theme.register(tk.Menu(self, tearoff=0), "menu")
+        shown = set(self._shown_columns())
+        self._col_vars = {}
+        for col, _, label in COLUMNS:
+            v = tk.BooleanVar(value=col in shown)
+            self._col_vars[col] = v
+            m.add_checkbutton(label=label.replace(" ⟳", ""), variable=v, command=lambda c=col: self.toggle_column(c))
+        m.add_separator()
+        m.add_command(label="Show all columns", command=lambda: self._apply_columns([c for c, _, _ in COLUMNS]))
+        return m
+
+    # -- per-song progress of the batch operations
+    def clear_busy(self, op: str) -> None:
+        """An operation ended (finished, stopped or failed): no song is in progress in it any more."""
+        for p, r in self.rows.items():
+            if r.get("op_" + op) == "busy":
+                self.add_row(p, None if r.get("status") != "searching" else "", ops={op: ""})
+
+    def set_op(self, path: str, op: str, state: str, status: str | None = None) -> None:
+        """Mark a song's progress in one operation column: busy (⟳), done (✓), skip (–), fail (✗)."""
+        key = state_key(path)
+        if key not in self.rows and not (op == "find" and state == "busy"):
+            return                                # only Find adds songs to the list
+        self.add_row(key, status, ops={op: state})
+
+    def remove_from_list(self, songs: list[str]) -> int:
+        """Take songs out of the list (files and saved choices are untouched; Apply leaves them out)."""
+        n = 0
+        for p in songs:
+            if self.rows.pop(p, None) is None:
+                continue
+            n += 1
+            self.row_status_before_choice.pop(p, None)
+            if p in self._shown:
+                parent = self.tree.parent(p)
+                self.tree.delete(p)
+                self._shown.discard(p)
+                self._mark_dirty(parent)
+        self._flush_groups()
+        self._update_count()
+        if n:
+            if hasattr(self.app, "session_changed"):
+                self.app.session_changed()
+            if hasattr(self.app, "refresh_apply_bar"):
+                self.app.refresh_apply_bar()
+        return n
+
+    def _delete_key(self, _e=None) -> str:
+        songs = self.selected_songs()
+        if songs:
+            self.remove_from_list(songs)
+        return "break"
+
+    def clear_list(self) -> None:
+        """Empty the song list (a new Find run starts a new list). The player keeps the open song."""
+        self.rows.clear()
+        self.tree.delete(*self.tree.get_children())
+        self.group_dirs.clear()
+        self._group_stats.clear()
+        self._dirty_groups.clear()
+        self._shown.clear()
+        self._group_target.clear()
+        self.row_status_before_choice.clear()
+        self._update_count()
+
     def _row_text(self, path) -> str:
         r = self.rows[path]
         return r["title"] or os.path.basename(display_path(path))
 
     def _upsert(self, path):
-        vals, tags = self._row_values(path), (self._row_tag(self.rows[path]),)
+        vals, tags = self._row_values(path), self._row_tags(self.rows[path])
         parent = self._ensure_groups(path)
         if path in self._shown:
             old_parent = self.tree.parent(path)
@@ -1039,6 +1231,8 @@ class ReviewTab(ttk.Frame):
     def _matches(self, path) -> bool:
         statuses = FILTERS.get(self.v_filter.get())
         r = self.rows[path]
+        if _busy(r):
+            return True                                   # being worked on right now: always shown
         if statuses is not None and r["status"] not in statuses:
             return False
         if self.v_only_found.get() and not self.has_found_lyrics(r):
@@ -1067,7 +1261,7 @@ class ReviewTab(ttk.Frame):
             if self._matches(p):
                 parent = self._ensure_groups(p)
                 self.tree.insert(parent, "end", iid=p, text=self._row_text(p), values=self._row_values(p),
-                                 tags=(self._row_tag(self.rows[p]),))
+                                 tags=self._row_tags(self.rows[p]))
                 self._shown.add(p)
                 self._dirty_groups.add(parent)
         self._flush_groups()
@@ -1117,7 +1311,7 @@ class ReviewTab(ttk.Frame):
 
     def _tree_click(self, e):
         """Clicking a Choice cell cycles: found sources → Don't change."""
-        if self.tree.identify_region(e.x, e.y) != "cell" or self.tree.identify_column(e.x) != "#4":
+        if self.tree.identify_region(e.x, e.y) != "cell" or self._column_at(e.x) != "choice":
             return None
         node = self.tree.identify_row(e.y)
         sel = self.tree.selection()
@@ -1133,7 +1327,7 @@ class ReviewTab(ttk.Frame):
 
     def _tree_motion(self, e) -> None:
         if self.tree.identify_region(e.x, e.y) == "heading":
-            text = COLUMN_HINTS.get(self.tree.identify_column(e.x), "")
+            text = COLUMN_HINTS.get(self._column_at(e.x), "")
             if text:
                 self._head_tip.show(text, e.x_root, e.y_root + 90)
                 return
@@ -1149,6 +1343,9 @@ class ReviewTab(ttk.Frame):
         return out
 
     def _tree_menu(self, e) -> str:
+        if self.tree.identify_region(e.x, e.y) == "heading":
+            self._columns_menu().tk_popup(e.x_root, e.y_root)
+            return "break"
         node = self.tree.identify_row(e.y)
         if not node:
             return "break"
@@ -1177,6 +1374,10 @@ class ReviewTab(ttk.Frame):
             m.add_command(label=f"Align on the GPU ({what})", command=lambda: self.app.align_paths(songs))
         m.add_separator()
         m.add_command(label=f"Restore original lyrics ({what})…", command=lambda: self.app.restore_paths(songs))
+        m.add_separator()
+        where = "this " + ("folder" if self._view() == "folder" else "group") if node.startswith("grp:") and \
+            len(self.tree.selection()) == 1 else what
+        m.add_command(label=f"Remove {where} from the list", command=lambda: self.remove_from_list(songs))
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1246,6 +1447,11 @@ class ReviewTab(ttk.Frame):
         for p, r in rows.items():
             base = _blank_row()
             base.update({k: v for k, v in r.items() if k in base})
+            for op in OPS:                                # nothing is in progress after a restart
+                if base["op_" + op] == "busy":
+                    base["op_" + op] = ""
+            if base["status"] == "searching":
+                base["status"] = ""
             self.rows[p] = base
         if "only_found" in data:
             self.v_only_found.set(bool(data["only_found"]))
@@ -1331,9 +1537,16 @@ class ReviewTab(ttk.Frame):
         self.cp_range = None
         self._token += 1
         token = self._token
-        self.v_title.set(f"Loading {os.path.basename(display_path(path))}…")
+        name = os.path.basename(display_path(path))
+        self.v_title.set(f"Loading {name}…")
         s = self.app.settings
         threading.Thread(target=self._load_worker, args=(token, path, s), daemon=True).start()
+
+        def show_if_slow():                       # quick loads don't flash a row
+            act = getattr(self.app, "activity", None)
+            if act is not None and token == self._token and getattr(self, "_loaded_token", 0) != token:
+                act.set("load", "Loading song", None, detail=name)
+        self.after(400, show_if_slow)
 
     def _collection_for(self, s):
         if not (s.use_collection and s.collection):
@@ -1387,11 +1600,12 @@ class ReviewTab(ttk.Frame):
     def handle(self, e: dict) -> None:
         t = e["type"]
         if t == "review_loaded":
+            self._loaded_token = e["token"]
             if e["token"] != self._token:
                 return
-            if e["err"]:
+            if e["err"]:                         # e.g. the file was moved: say so without blocking
                 self.v_title.set(os.path.basename(display_path(e["path"])))
-                messagebox.showerror(APP_TITLE, e["err"])
+                self.v_audio_note.set(f"Couldn't open this song: {e['err']}")
                 return
             fits = e.get("fits") or {}
             if fits and e["path"] in self.rows:
@@ -1512,6 +1726,8 @@ class ReviewTab(ttk.Frame):
                     note = f"Default: {pend[1]}"
         default = self.song is not None and self.song.override is None
         self._style_btn(self.btn_keep, keep_sel, "Keeping current" + (" (default)" if default else "")
+                        if keep_sel else "Keep current")
+        self._style_btn(self.btn_keep2, keep_sel, "Keeping current" + (" (default)" if default else "")
                         if keep_sel else "Keep current")
         self._style_btn(self.btn_apply, new_sel, "Using new" + (" (default)" if default else "")
                         if new_sel else "Use new")
@@ -1949,14 +2165,8 @@ class ReviewTab(ttk.Frame):
             messagebox.showinfo(APP_TITLE, "Choose synced lyrics in the New pane first.")
             return
         app = self.app
-        if not app.settings.ai_align:
-            if not messagebox.askyesno(APP_TITLE, "Auto-align uses the NVIDIA GPU add-on (Align low-confidence "
-                                                  "lyrics). Switch it on?"):
-                return
-            app.v_ai.set(True)
-            app._ai_toggled()
-            if not app.settings.ai_align:
-                return                                   # refused, no GPU, or installing: try again after
+        if not app._ensure_ai():
+            return                                       # refused, no GPU, or installing: try again after
         items = ai_align.lyric_lines(self.cand.text)
         if len(items) < 2:
             messagebox.showinfo(APP_TITLE, "These lyrics have fewer than 2 timed lines to align.")
@@ -1969,7 +2179,16 @@ class ReviewTab(ttk.Frame):
         else:
             self.v_ai_note.set("Aligning on the GPU… (the first time also loads the models)")
         self.btn_ai.config(state="disabled")
+        app.activity.set("autoalign", "Auto-align (GPU)", None,
+                         detail=os.path.basename(display_path(self.song.path)), stop=self.cancel_auto_align)
         svc.request_raw(self.song.path, [b for _, b in items], items[0][0], self._align_req)
+
+    def cancel_auto_align(self) -> None:
+        """Forget the pending Auto-align request (its answer is ignored when it arrives)."""
+        self._align_req = None
+        self.btn_ai.config(state="normal")
+        self.v_ai_note.set("Auto-align cancelled.")
+        self.app.activity.done("autoalign")
 
     def align_result(self, e: dict) -> None:
         """The GPU's answer to Auto-align: heard words always shown; times applied if verified."""
@@ -2692,6 +2911,9 @@ class ReviewTab(ttk.Frame):
             messagebox.showinfo(APP_TITLE, "This file has no title tag to search for.")
             return
         token, meta, dur, s = self._token, self.song.meta, self._duration(), self.app.settings
+        act = getattr(self.app, "activity", None)
+        if act is not None:
+            act.set("search", "Searching LRCLIB", None, detail=meta.title)
 
         def work():
             try:

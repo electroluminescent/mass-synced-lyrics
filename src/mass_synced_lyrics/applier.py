@@ -172,6 +172,7 @@ def apply_all(settings: Settings, paths: Iterable[str], emit: Callable[[dict], N
 
     def job(path: str, state: State):
         out = lrc_path_for(path) if mode == LRC else path
+        emit({"type": "apply_file_start", "path": path})
         with locks.get(out):
             try:
                 return _apply_one(path, mode, settings, state)
@@ -260,6 +261,7 @@ def restore_originals(settings: Settings, paths: Iterable[str], emit: Callable[[
     locks = _PathLocks()
 
     def job(path: str, state: State):
+        emit({"type": "restore_file_start", "path": path})
         with locks.get(lrc_path_for(path)):
             try:
                 return _restore_one(path, settings, state)
