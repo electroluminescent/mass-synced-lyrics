@@ -267,3 +267,20 @@ def test_volume_curve_is_logarithmic():
     assert volume_gain(75) == pytest.approx(10 ** (-10 / 20))
     assert volume_gain(25) < volume_gain(50) < volume_gain(75)
     assert volume_gain(-5) == 0 and volume_gain(500) == pytest.approx(1.0)
+
+
+def test_tidy_options_apply_to_written_lyrics(settings):
+    d = settings.music_folder
+    fancy = "[00:01.00]  “Hello” it’s me  \n[00:04.00]…and you"
+    a = make_track(os.path.join(d, "a.flac"), "flac")
+    write_lrc(os.path.join(d, "a.lrc"), fancy)
+    settings.tidy_trim = settings.tidy_quotes = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib()).run()
+    assert TagFile(a).read().lyrics[0] == '[00:01.00]"Hello" it\'s me\n[00:04.00]...and you'
+    # the apply step tidies too (e.g. a choice made before the options were switched on)
+    b = make_track(os.path.join(d, "b.flac"), "flac", title="Other")
+    settings.tidy_trim = settings.tidy_quotes = False
+    review.choose(b, fancy, "mine", settings)
+    settings.tidy_quotes = True
+    apply_all(settings, [b])
+    assert "“" not in TagFile(b).read().lyrics[0] and "  " in TagFile(b).read().lyrics[0]

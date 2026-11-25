@@ -87,6 +87,7 @@ def _apply_one(path: str, mode: str, s: Settings, state: State) -> tuple[str, st
         if pend is None:
             return "unchanged", "", "nothing to apply"
         source, label, text, lrc_src = pend
+    text = s.tidy(text) if text else text
     lp = to_long_path(path)
     try:
         tf = TagFile(lp)

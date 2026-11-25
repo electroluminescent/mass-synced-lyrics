@@ -63,6 +63,7 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 - **Overview waveform** of the whole song, with lyric lanes for the **current** (gold) and **new** (green) lyrics. Each bar spans the time its line is shown. Word timings appear as divisions inside a bar, and the playing line lights up.
 - **Scrolling waveform** that moves past a fixed red playhead (8 s view), with line text, progress through the line, and the current word.
 - Seeks and scrubbing glide with a 0.2 s ease.
+- **Time rulers** under both waveforms show where you are.
 - **Hovering** over a waveform shows the current and new lyric at that point.
 - **Click a waveform to jump there; drag it to scrub.**
 - **Checkpoints:**
@@ -93,6 +94,15 @@ Pins, edits and checkpoints are saved per song.
 **Per-file choices** are recorded here and written by the bottom bar's **Apply**. They take precedence over the saved settings and the current run's options, and later runs keep them.
 
 On Windows, sound is played through the default output device. Without an output device, playback still runs silently so the waveform and lyrics keep moving.
+
+## Cleaning up lyrics
+
+Two options on the Find lyrics tab tidy every lyric the app writes. Both are off by default.
+
+- **Trim spaces from each lyric line:** removes spaces at the start and end of each line, after its timestamp.
+- **Straighten smart quotes and punctuation:** turns typographic characters into plain ones: ‘ ’ → `'`, “ ” → `"`, … → `...`, – — → `-`. Unusual or invisible spaces become normal spaces or are removed.
+
+The player's New pane shows the cleaned-up text. On the command line, use `--trim` and `--straighten`.
 
 ## Sessions and restoring
 
@@ -135,7 +145,7 @@ mass-synced-lyrics-gui                 # desktop interface
 mass-synced-lyrics "D:\Music" --dry-run
 ```
 
-Command line options: `--output embed|lrc`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--log-dir DIR`, `--state-db FILE`.
+Command line options: `--output embed|lrc`, `--trim`, `--straighten`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--log-dir DIR`, `--state-db FILE`.
 
 Settings, the state database and logs are stored in `%APPDATA%\mass-synced-lyrics\`.
 

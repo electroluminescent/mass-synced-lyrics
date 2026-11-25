@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3
+- New options (Find lyrics tab, off by default; `--trim` / `--straighten` on the command line):
+  **Trim spaces from each lyric line** and **Straighten smart quotes and punctuation**
+  (‘ ’ → '  “ ” → "  … → ...  – — → -  unusual/invisible spaces normalised). They apply to every
+  lyric that gets written, and the player's New pane shows the cleaned-up text.
+- Time rulers under both waveforms (m:ss); the scrolling ruler is part of the pre-rendered view.
+
 ## 1.1.2
 - Loading the last session never changes files. The option is now **Also include songs that were
   already saved**: those songs come back listed as **Saved** (off by default = only songs still to

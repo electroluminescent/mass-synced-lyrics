@@ -160,6 +160,18 @@ class App(tk.Tk):
                 self.cmb_session = theme.hint(ttk.Combobox(opt, state="readonly", values=[v for _, v in SESSION_MODES]), 'What to do with the last review session when the app opens.')
                 self.cmb_session.grid(row=r, column=1, sticky="ew")
             r += 1
+        self.v_trim = tk.BooleanVar()
+        self.v_quotes = tk.BooleanVar()
+        for text, var, tip in (("Trim spaces from each lyric line", self.v_trim,
+                                 "Remove spaces at the start and end of every lyric line (after its timestamp) "
+                                 "in the lyrics that get written."),
+                                ("Straighten smart quotes and punctuation", self.v_quotes,
+                                 "Typographic characters become plain ones in the lyrics that get written: "
+                                 "‘ ’ → '   “ ” → \"   … → ...   – — → -   and unusual or invisible spaces → "
+                                 "normal spaces.")):
+            theme.hint(ttk.Checkbutton(opt, text=text, variable=var, style=sw,
+                                       command=self._tidy_changed), tip).grid(
+                row=r, column=0, columnspan=2, sticky="w", pady=2); r += 1
         for text, var, tip in (("Keep original file modified dates", self.v_mtime,
                                  "After writing, put each file's modified date back so cloud sync and music "
                                  "libraries don't treat it as changed."),
@@ -219,6 +231,16 @@ class App(tk.Tk):
         theme.hint(ttk.Checkbutton(head, text="Dark mode", variable=self.v_dark, command=self._toggle_theme,
                         style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"), 'Switch between light and dark appearance.').pack(side="right")
 
+    def _tidy_changed(self) -> None:
+        self.settings.tidy_trim = bool(self.v_trim.get())
+        self.settings.tidy_quotes = bool(self.v_quotes.get())
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+        if self.review.song is not None:
+            self.review._recompute()            # preview the cleaned-up lyrics right away
+
     def _toggle_theme(self) -> None:
         self.settings.theme = "dark" if self.v_dark.get() else "light"
         theme.apply(self, self.settings.theme)
@@ -244,6 +266,8 @@ class App(tk.Tk):
         self.v_retry.set(s.retry_misses)
         self.v_output.set(s.output_mode if s.output_mode in ("embed", "lrc") else "embed")
         self.cmb_session.set(dict(SESSION_MODES).get(s.session_restore, SESSION_MODES[0][1]))
+        self.v_trim.set(s.tidy_trim)
+        self.v_quotes.set(s.tidy_quotes)
 
     def _collect_settings(self) -> Settings:
         s = self.settings
@@ -263,6 +287,8 @@ class App(tk.Tk):
         s.retry_misses = self.v_retry.get()
         s.output_mode = self.v_output.get()
         s.session_restore = next((k for k, v in SESSION_MODES if v == self.cmb_session.get()), "ask")
+        s.tidy_trim = bool(self.v_trim.get())
+        s.tidy_quotes = bool(self.v_quotes.get())
         return s
 
     # ------------------------------------------------------------- actions

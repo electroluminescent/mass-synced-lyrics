@@ -437,3 +437,14 @@ def test_session_multiselect_save_now_and_restore(settings, tmp_path, monkeypatc
     assert pump(app3, lambda: len(app3.review.rows) == 3)      # restored song is no longer "saved"
     assert getattr(app3, "_session_dialog_win", None) is None
     app3._on_close()
+
+
+def test_cli_trim_and_straighten(settings, tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    d = settings.music_folder
+    p = make_track(os.path.join(d, "a.flac"), "flac")
+    write_lrc(os.path.join(d, "a.lrc"), "[00:01.00] ‘x’ \n[00:02.00]y…")
+    assert cli.main([d, "--offline", "--trim", "--straighten", "--lrc-action", "keep",
+                     "--log-dir", settings.log_dir, "--state-db", settings.state_db]) == 0
+    assert TagFile(p).read().lyrics[0] == "[00:01.00]'x'\n[00:02.00]y..."

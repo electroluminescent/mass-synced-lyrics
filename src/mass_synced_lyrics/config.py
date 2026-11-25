@@ -38,6 +38,12 @@ class Settings:
     review_split: int = 0                # review tab: width of the song list (0 = default)
     session_restore: str = "ask"
     session_include_saved: bool = False  # reloading a session also lists songs already saved
+    tidy_trim: bool = False              # trim spaces at the start/end of each lyric line
+    tidy_quotes: bool = False            # straighten smart quotes & punctuation
+
+    def tidy(self, text):
+        from .lrc import tidy
+        return tidy(text, self.tidy_trim, self.tidy_quotes)
     theme: str = "light"                 # light | dark         # on start: ask | load | fresh (last review session)
     log_dir: str = ""
     state_db: str = ""

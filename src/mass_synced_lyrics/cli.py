@@ -24,6 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what to do with a sidecar .lrc after embedding it (default: recycle)")
     p.add_argument("--no-restore-mtime", action="store_true", help="let file modified times change")
     p.add_argument("--threshold", type=int, metavar="0-100", help="name match confidence (default 90)")
+    p.add_argument("--trim", action="store_true", help="trim spaces at the start/end of each lyric line")
+    p.add_argument("--straighten", action="store_true",
+                   help="straighten smart quotes and punctuation (’ → ', “” → \", … → ..., dashes → -)")
     p.add_argument("--no-acoustid", action="store_true", help="never fingerprint untagged files")
     p.add_argument("--acoustid-key", help="AcoustID application API key")
     p.add_argument("--fpcalc", help="path to fpcalc")
@@ -69,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
         s.restore_mtime = False
     if args.threshold is not None:
         s.match_threshold = max(50, min(100, args.threshold))
+    if args.trim:
+        s.tidy_trim = True
+    if args.straighten:
+        s.tidy_quotes = True
     if args.no_acoustid:
         s.use_acoustid = False
     if args.acoustid_key:

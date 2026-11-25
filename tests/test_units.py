@@ -146,3 +146,17 @@ def test_retime_pins_and_interpolation():
     assert lrc.warp(4.0, [(1.0, 3.0)]) == pytest.approx(6.0)                     # single pin = shift
     head = lrc.retime("[length: 03:00.00]\n[00:01.00]x\n[00:02.00]y", factor=1.1)
     assert head.splitlines()[0] == "[length: 03:18.00]"
+
+
+def test_tidy_trim_and_straighten():
+    t = "[ti: Café ]\n[00:01.00]  “Don’t stop” — now…  \n[00:02.00][00:05.00] <00:02.00>a b​  \n  plain  "
+    assert lrc.straighten("‘a’ “b” … – ´") == "'a' \"b\" ... - '"
+    trimmed = lrc.trim_lines(t)
+    assert trimmed.splitlines()[1] == "[00:01.00]“Don’t stop” — now…"
+    assert trimmed.splitlines()[0] == "[ti: Café ]"                # header untouched by trim
+    both = lrc.tidy(t, trim=True, quotes=True)
+    assert both.splitlines()[1] == '[00:01.00]"Don\'t stop" - now...'
+    assert both.splitlines()[2] == "[00:02.00][00:05.00]<00:02.00>a b"
+    assert both.splitlines()[3] == "plain"
+    assert lrc.tidy(t) == t and lrc.tidy(None, True, True) is None
+    assert lrc.tidy(both, True, True) == both                       # idempotent

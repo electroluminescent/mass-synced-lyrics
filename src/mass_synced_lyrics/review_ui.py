@@ -72,6 +72,44 @@ COLUMN_HINTS = {
 }
 
 
+RULER_H = 16
+RULER_FG, RULER_TICK = "#9aa0a6", "#5f6368"
+
+
+def _ruler_step(duration: float, width: float, min_px: float = 70.0) -> float:
+    """A 'nice' label interval so labels are at least min_px apart."""
+    for step in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600):
+        if duration <= 0 or step / duration * width >= min_px:
+            return float(step)
+    return 3600.0
+
+
+def _draw_ruler(c: tk.Canvas, start: float, end: float, to_x, y0: int, width: float,
+                step: float | None = None) -> None:
+    """Time ruler at y0: a baseline, labelled ticks every `step` s and small ticks in between."""
+    if end <= start:
+        return
+    step = step or _ruler_step(end - start, width)
+    minor = step / 5 if step >= 5 else (step / 2 if step > 1 else 0.5)
+    c.create_line(to_x(start), y0, to_x(end), y0, fill=RULER_TICK, tags="ruler")
+    t = start
+    k = 0
+    while t <= end + 1e-6:
+        x = to_x(t)
+        major = abs((t / step) - round(t / step)) < 1e-6
+        c.create_line(x, y0, x, y0 + (6 if major else 3), fill=RULER_TICK, tags="ruler")
+        if major:
+            c.create_text(x + 2, y0 + 3, text=fmt_clock(t), anchor="nw", fill=RULER_FG,
+                          font=("TkDefaultFont", 7), tags="ruler")
+        k += 1
+        t = start + k * minor
+
+
+def fmt_clock(t: float) -> str:
+    t = int(round(max(0.0, t)))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
 def _hex_rgb(color: str) -> tuple[int, int, int]:
     color = color.lstrip("#")
     return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
@@ -264,7 +302,7 @@ class ReviewTab(ttk.Frame):
         self.v_audio_note = tk.StringVar()
         ttk.Label(right, textvariable=self.v_audio_note, style="Caption.TLabel").grid(row=r, column=0, sticky="w"); r += 1
 
-        self.ov = tk.Canvas(right, height=78, background=BG, highlightthickness=0, cursor="hand2")
+        self.ov = tk.Canvas(right, height=78 + RULER_H, background=BG, highlightthickness=0, cursor="hand2")
         self.ov.grid(row=r, column=0, sticky="ew"); r += 1
         self.cpbar = theme.register(tk.Canvas(right, height=28, highlightthickness=0), "bg")
         self.cpbar.grid(row=r, column=0, sticky="ew"); r += 1
@@ -279,7 +317,8 @@ class ReviewTab(ttk.Frame):
         theme.hint(ttk.Checkbutton(cpr, text="Loop", variable=self.v_loop,
                         command=self._save_globals), 'Repeat a checkpoint until you stop it.').pack(side="left", padx=8)
         theme.hint(ttk.Button(cpr, text="Reset points", command=self._default_checkpoints), 'Back to the default checkpoints: the first and last lyric line.').pack(side="left")
-        self.sc = tk.Canvas(right, height=128, background=BG, highlightthickness=0, cursor="sb_h_double_arrow")
+        self.sc = tk.Canvas(right, height=128 + RULER_H, background=BG, highlightthickness=0,
+                            cursor="sb_h_double_arrow")
         self.sc.grid(row=r, column=0, sticky="ew"); r += 1
 
         tcard = theme.card(right, padding=(12, 8))
@@ -1025,6 +1064,8 @@ class ReviewTab(ttk.Frame):
         self.orig_lines = lrcmod.display_lines(text) if text and c.synced else []
         if text and c.synced:
             text = lrcmod.retime(text, self.offset, self.factor, self.pins, self.interpolate)
+        if text:
+            text = self.app.settings.tidy(text)           # show exactly what would be written
         self._style_interp()
         self.new_text = text
         self.new_lines = lrcmod.display_lines(text)
@@ -1546,6 +1587,7 @@ class ReviewTab(ttk.Frame):
                 for ws, _, _ in sg.words[1:]:
                     xw = ws / dur * w
                     c.create_line(xw, y0, xw, y0 + 10, fill=BG)
+        _draw_ruler(c, 0.0, dur, lambda t: t / dur * w, 78, w)
         for i, t in enumerate(self.checkpoints):
             x = t / dur * w
             c.create_line(x, 0, x, h, fill=CP_COLOR, dash=(3, 2))
@@ -1579,6 +1621,8 @@ class ReviewTab(ttk.Frame):
                   "env": envelope(self.audio.peaks, 0.0, dur, n), "tiles": {}, "lanes": None}
             c.configure(scrollregion=(0, 0, sc["total"], int(c.cget("height"))), xscrollincrement=1)
             h = int(c.cget("height"))
+            _draw_ruler(c, 0.0, dur, lambda t, sc=sc: sc["pad"] + t * sc["pps"], 128, sc["total"],
+                        step=1.0 if pps >= 55 else 2.0)
             sc["center"] = c.create_line(0, 0, 0, h, fill=PLAYHEAD, width=2, tags="center")
             self._scene = sc
         lanes = (id(self.cur_segs), id(self.new_segs))

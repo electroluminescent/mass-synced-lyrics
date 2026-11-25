@@ -263,14 +263,14 @@ class Engine:
         # 1. Local sources: a sidecar .lrc beside the file always wins.
         local: tuple | None = None            # (source, text, lrc_file label, score, lrc_src path)
         if match is not None:
-            local = ("local .lrc", match.lrc.text, display_path(match.lrc.path), round(match.score, 1),
+            local = ("local .lrc", s.tidy(match.lrc.text), display_path(match.lrc.path), round(match.score, 1),
                      match.lrc.path)
-            if any(lrcmod.same_lyrics(t, match.lrc.text) for t in existing):
+            if any(lrcmod.same_lyrics(t, local[1]) for t in existing):
                 res = Result(path, "already_embedded", mode, meta, dur, local[2], local[3],
                              local="sidecar", choice="local")
                 if find and self._will_dispose(match.lrc.path, path):
                     # remember the sidecar so the final apply step can tidy it up
-                    state.set_pending(path, "local .lrc", f"sidecar {res.lrc_file}", match.lrc.text,
+                    state.set_pending(path, "local .lrc", f"sidecar {res.lrc_file}", local[1],
                                       match.lrc.path)
                 self._dispose_lrc(match.lrc.path, res)
                 return res
@@ -280,7 +280,7 @@ class Engine:
             # .lrc output: lyrics already embedded in the file can simply be exported.
             emb = next((t for t in meta.lyrics if lrcmod.is_synced(t)), None)
             if emb:
-                local = ("embedded", emb, "", None, "")
+                local = ("embedded", s.tidy(emb), "", None, "")
         if local is None and note.startswith("ambiguous"):
             return Result(path, "ambiguous", meta=meta, duration=dur, detail=note, choice="keep")
 
@@ -296,7 +296,7 @@ class Engine:
         if local is None and ident is not None and self.collection is not None and len(self.collection):
             hit, why = self.collection.find(ident.title, ident.artist, dur, s.match_threshold)
             if hit:
-                local = ("collection", hit.entry.lrc.text, display_path(hit.entry.lrc.path),
+                local = ("collection", s.tidy(hit.entry.lrc.text), display_path(hit.entry.lrc.path),
                          round(hit.score, 1), "")
             elif why:
                 note = (note + "; " if note else "") + why
@@ -308,6 +308,8 @@ class Engine:
         online_ok = s.use_online and self.lrclib is not None and online_allowed and ident is not None
         if online_ok and (local is None or find):
             found = self._lookup(ident, dur, state)
+            if found.status == "found":
+                found.synced = s.tidy(found.synced)
         online = ONLINE_LABELS.get(found.status, "") if found else ""
         detail = "; ".join(x for x in (note, how, found.how if found else "") if x)
         shown = ident or meta
@@ -416,6 +418,7 @@ class Engine:
 
     def _apply_override(self, path, open_tf, ov, st, state: State) -> Result:
         kind, text, label = ov[:3]
+        text = self.s.tidy(text) if text else text
         if kind == KEEP:
             return Result(path, "locked", "your choice", detail="keep current lyrics", choice="keep")
         choice = state.choice_kind_for_text(path, text)

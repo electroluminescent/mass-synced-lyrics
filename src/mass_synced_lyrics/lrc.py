@@ -302,3 +302,45 @@ def segment_at(segs: list[Segment], t: float) -> int:
         if s.start > t:
             break
     return -1
+
+
+# ------------------------------------------------------------------ tidying
+_STRAIGHTEN = str.maketrans({
+    "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'", "´": "'", "`": "'",
+    "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
+    "–": "-", "—": "-", "―": "-", "‒": "-", "−": "-",
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+    "　": " ",
+    "​": None, "‌": None, "‍": None, "⁠": None, "﻿": None,
+})
+
+
+def straighten(text: str) -> str:
+    """Typographic ("smart") quotes and punctuation → plain ASCII: ‘’ → ', “” → ", … → ...,
+    en/em dashes → -, unusual spaces → normal spaces, invisible characters removed."""
+    return text.translate(_STRAIGHTEN).replace("…", "...")
+
+
+def trim_lines(text: str) -> str:
+    """Remove spaces at the start and end of each lyric line (after its timestamps)."""
+    out = []
+    for line in text.splitlines():
+        m = LINE_TS_RE.match(line)
+        if m:
+            stamps = "".join(t.group(0) for t in TS_RE.finditer(m.group(0)))
+            line = stamps + line[m.end():].strip()
+        else:
+            line = line.strip()
+        out.append(line)
+    return "\n".join(out).strip("\n")
+
+
+def tidy(text: str | None, trim: bool = False, quotes: bool = False) -> str | None:
+    if not text:
+        return text
+    if quotes:
+        text = straighten(text)
+    if trim:
+        text = trim_lines(text)
+    return text
