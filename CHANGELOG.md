@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.1
+- Alignment runs alongside Find: low-confidence songs are queued as they are found and aligned on the
+  GPU while finding carries on.
+- If the aligner fails (out of GPU memory, a damaged add-on, the GPU missing), alignment pauses and a
+  window shows the error. Finding carries on and eligible songs keep queueing. The window offers:
+  - **Ignore and keep aligning:** skip the failed song, restart the aligner, and work through the queue.
+  - **Stop using alignment:** switch the feature off; songs keep their found lyrics.
+  - **Cancel the run:** stop finding and aligning.
+
+  The song that failed always keeps its found lyrics. 3 single-song failures in a row open the same window.
+- After about 2 minutes with nothing to align, the aligner closes and frees its GPU memory.
+
 ## 1.2.0
 - **Align low-confidence lyrics (NVIDIA GPU)**: an optional switch under **Scores and alignment** on
   the Find lyrics tab, off by default.

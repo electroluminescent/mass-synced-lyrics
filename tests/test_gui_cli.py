@@ -712,11 +712,12 @@ def test_align_toggle_needs_nvidia_and_updates_the_list(settings, tmp_path, monk
     monkeypatch.setenv("MSL_ALIGNER_CMD", __import__("json").dumps(
         [_sys.executable, os.path.join(os.path.dirname(__file__), "fake_aligner.py")]))
     for e in events:
-        app._handle(e)                  # the end of Find starts aligning the low-confidence songs
-    assert app.align_worker is not None
-    for _ in range(500):
+        app._handle(e)                  # the low-confidence song is queued for the GPU while Find runs
+    assert app.align_service is not None
+    k = state_key(loose)
+    for _ in range(800):
         app.update()
-        if app.align_worker is None:
+        if app.review.rows[k]["status"] == "aligned" and app.align_service.idle():
             break
         app.after(10)
     k = state_key(loose)
@@ -724,5 +725,77 @@ def test_align_toggle_needs_nvidia_and_updates_the_list(settings, tmp_path, monk
     assert app.review.rows[k]["conf_online"] == 100
     assert app.review.tree.set(k, "status") == "Aligned"
     assert "Aligned (100% of words heard)" in app.txt.get("1.0", "end")
+    app.review.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_align_error_popup_choices(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    import threading
+
+    from mass_synced_lyrics import ai_align
+
+    app = new_app(settings)
+    app.settings.ai_align = True
+    app.v_ai.set(True)
+
+    class Svc:
+        def __init__(self):
+            self.calls = []
+            self.done = 0
+
+        def pending(self):
+            return 2
+
+        def resume(self):
+            self.calls.append("resume")
+
+        def stop(self):
+            self.calls.append("stop")
+
+        def idle(self):
+            return True
+
+    def buttons():
+        out = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                if c.winfo_class() == "TButton":
+                    out.append(c)
+                walk(c)
+        walk(app._align_dialog)
+        return {b.cget("text"): b for b in out}
+
+    for choice in ("Ignore and keep aligning", "Stop using alignment", "Cancel the run"):
+        svc = app.align_service = Svc()
+        busy = threading.Event()
+        app.worker = threading.Thread(target=busy.wait, daemon=True)      # a Find run in progress
+        app.worker.start()
+        app.cancel = threading.Event()
+        app._handle({"type": "align_error", "error": "CUDA error: out of memory", "path": "x", "queued": 2})
+        app.update()
+        assert app._align_dialog is not None and app._align_dialog.winfo_exists()
+        assert "2 song(s) are waiting" in app._align_dialog_wait.get()
+        app._handle({"type": "align_error", "error": "again", "path": "y", "queued": 2})   # one dialog only
+        buttons()[choice].invoke()
+        app.update()
+        assert app._align_dialog is None
+        if choice.startswith("Ignore"):
+            assert svc.calls == ["resume"] and app.settings.ai_align and not app.cancel.is_set()
+        elif choice.startswith("Stop using"):
+            assert svc.calls == ["stop"] and not app.settings.ai_align and not app.v_ai.get()
+            assert not app.cancel.is_set()                                    # Find carries on
+            app.settings.ai_align = True
+            app.v_ai.set(True)
+        else:
+            assert "stop" in svc.calls and app.cancel.is_set() and app.settings.ai_align
+        busy.set()
+        app.worker.join(1)
+    assert "Align: paused — CUDA error: out of memory" in app.txt.get("1.0", "end")
+    assert ai_align.AlignService                              # the real one is used outside this test
     app.review.shutdown()
     app.destroy()

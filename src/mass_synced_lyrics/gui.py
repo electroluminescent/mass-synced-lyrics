@@ -414,6 +414,9 @@ class App(tk.Tk):
         save_settings(s)
         s = dataclasses.replace(s, dry_run=True)   # find only; the bottom bar writes
         self._switched_to_review = False
+        svc = self._align_service(create=False)
+        if svc is not None:
+            svc.reset_counts()
         if bool(self.review.v_only_found.get()) != s.only_found:
             self.review.v_only_found.set(s.only_found)
             self.review._refill()
@@ -434,8 +437,10 @@ class App(tk.Tk):
 
     def _stop(self) -> None:
         self.cancel.set()
-        if getattr(self, "align_cancel", None) is not None:
-            self.align_cancel.set()
+        svc = self._align_service(create=False)
+        if svc is not None:
+            svc.stop()
+            self.align_service = None
         self.v_status.set("Stopping after the current file…")
         self.btn_stop.config(state="disabled")
 
@@ -639,44 +644,39 @@ class App(tk.Tk):
         except OSError:
             pass
 
-    def align_paths(self, paths: list[str] | None = None, everything: bool = True) -> None:
-        """Align on the GPU: the given songs (context menu), or the low-confidence ones in the list."""
+    def _align_service(self, create: bool = True):
         from . import ai_align
 
-        if getattr(self, "align_worker", None) is not None and self.align_worker.is_alive():
-            return
-        if not (self.settings.ai_align and ai_align.is_installed()):
-            return
-        if ai_align.nvidia_gpu() is None:
-            self._log("Align: no NVIDIA GPU found — skipped.")
-            return
-        s = dataclasses.replace(self._collect_settings())
-        targets = list(paths) if paths is not None else self._session_paths()
-        self.align_cancel = threading.Event()
-        self.btn_stop.config(state="normal")
-        self.btn_start.config(state="disabled")
+        svc = getattr(self, "align_service", None)
+        if svc is None and create:
+            svc = self.align_service = ai_align.AlignService(lambda: self.settings, self.events.put)
+        return svc
 
-        def work():
-            try:
-                ai_align.run(s, targets, self.events.put, self.align_cancel, everything=everything)
-            except Exception as e:
-                self.events.put({"type": "align_done", "counts": {}, "cancelled": False, "total": 0,
-                                 "error": f"{type(e).__name__}: {e}"})
-        self.align_worker = threading.Thread(target=work, daemon=True)
-        self.align_worker.start()
+    def queue_alignment(self, paths, force: bool = False) -> int:
+        """Queue songs for the GPU aligner (runs alongside Find). force=True: whatever their scores."""
+        if not self.settings.ai_align or not paths:
+            return 0
+        n = self._align_service().submit(paths, force=force)
+        if n:
+            self.btn_stop.config(state="normal")
+        return n
+
+    def align_paths(self, paths: list[str] | None = None, everything: bool = True) -> None:
+        """Right-click → Align on the GPU (everything=True), or the low-confidence songs in the list."""
+        from . import ai_align
+
+        if paths is None:
+            paths = ai_align.pick_low_confidence(self.settings, self._session_paths())
+        self.queue_alignment(paths, force=everything)
 
     def _align_event(self, e: dict) -> None:
         t = e["type"]
-        if t == "align_start":
-            if e["total"]:
-                self._log("")
-                self._log(f"Aligning {e['total']} low-confidence song(s) on the GPU — the first one also loads "
-                          "the models…")
-                self.v_status.set(f"Aligning 0/{e['total']} on the GPU…")
-            return
+        svc = self._align_service(create=False)
+        waiting = svc.pending() if svc is not None else 0
         if t == "align_progress":
-            self.v_status.set(f"Aligning {e['done']}/{e['total']} on the GPU…")
             name = display_path(e["path"])
+            self.v_status.set(f"Aligning on the GPU · {svc.done if svc else 0} done"
+                              + (f" · {waiting} waiting" if waiting else ""))
             if e["status"] == "aligned":
                 kind = e.get("kind") or "online"
                 kw = {f"conf_{kind}": e.get("confidence"), f"fit_{kind}": e.get("fit")}
@@ -687,29 +687,108 @@ class App(tk.Tk):
                     self.review.load_song(e["path"])
             elif e["status"] == "rejected":
                 v = e.get("verify")
-                self._log(f"Not aligned{f' ({v:.0f}% heard)' if v is not None else ''}: {name} — {e['reason']}")
+                self._log(f"Not aligned{f' ({v:.0f}% heard)' if v is not None else ''}: {name} — {e['reason']}"
+                          " — keeps its found lyrics")
             elif e["status"] == "error":
-                self._log(f"Align error: {name} — {e['reason']}")
+                self._log(f"Align error: {name} — {e['reason']} — keeps its found lyrics")
             if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > 1.5:
                 self.refresh_apply_bar(background=True)
             return
-        # align_done
-        c = e.get("counts", {})
-        if e.get("error"):
-            self._log(f"Align: stopped by an error: {e['error']}")
-        if e.get("total"):
-            self._log(f"Align: {c.get('aligned', 0)} aligned, {c.get('rejected', 0)} kept as found (below "
-                      f"{self.settings.ai_align_min}% or not placeable), {c.get('error', 0)} errors"
-                      + (" (stopped)" if e.get("cancelled") else "") + ".")
-            self.v_status.set(f"Aligned {c.get('aligned', 0)} of {e['total']} song(s) on the GPU"
-                              + (" (stopped)" if e.get("cancelled") else ""))
-        self.align_worker = None
+        if t == "align_error":
+            self._log(f"Align: paused — {e['error']}")
+            self.v_status.set(f"Aligning paused · {waiting} waiting")
+            self._align_error_dialog(e["error"])
+            return
+        # align_idle: the queue is empty for now
         finding = bool(self.worker and self.worker.is_alive())
-        applying = bool(self.apply_worker and self.apply_worker.is_alive())
-        self.btn_start.config(state="disabled" if finding or applying else "normal")
-        self.btn_stop.config(state="normal" if finding else "disabled")
+        if not finding and svc is not None and svc.done:
+            c = e.get("counts", {})
+            self._log(f"Align: {c.get('aligned', 0)} aligned, {c.get('rejected', 0)} kept as found (below "
+                      f"{self.settings.ai_align_min}% or not placeable), {c.get('error', 0)} errors.")
+            self.v_status.set(f"Aligned {c.get('aligned', 0)} of {svc.done} song(s) on the GPU")
+            svc.reset_counts()
+            self.btn_stop.config(state="disabled")
         self.refresh_apply_bar()
         self.session_changed()
+
+    def _align_error_dialog(self, error: str) -> None:
+        """The aligner failed: Find keeps going and songs keep queueing until the user picks what to do."""
+        if getattr(self, "_align_dialog", None) is not None:
+            try:
+                if self._align_dialog.winfo_exists():
+                    self._align_dialog.lift()
+                    return
+            except tk.TclError:
+                pass
+        dlg = tk.Toplevel(self)
+        self._align_dialog = dlg
+        dlg.title("Align low-confidence lyrics")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        body = ttk.Frame(dlg, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Aligning on the GPU stopped with an error", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(body, text=error, wraplength=460, justify="left").pack(anchor="w", pady=(8, 8))
+        self._align_dialog_wait = tk.StringVar()
+        ttk.Label(body, textvariable=self._align_dialog_wait, style="Muted.TLabel", wraplength=460,
+                  justify="left").pack(anchor="w", pady=(0, 12))
+
+        def refresh_wait():
+            svc = self._align_service(create=False)
+            if not dlg.winfo_exists():
+                return
+            n = svc.pending() if svc is not None else 0
+            self._align_dialog_wait.set(
+                "Finding lyrics carries on meanwhile. The song that failed keeps its found lyrics. "
+                f"{n} song(s) are waiting to be aligned.")
+            dlg.after(1000, refresh_wait)
+        refresh_wait()
+        row = ttk.Frame(body)
+        row.pack(fill="x")
+
+        def choose(what: str) -> None:
+            self._align_dialog = None
+            try:
+                dlg.destroy()
+            except tk.TclError:
+                pass
+            svc = self._align_service(create=False)
+            if what == "ignore":
+                self._log("Align: error ignored — aligning the waiting songs.")
+                if svc is not None:
+                    svc.resume()
+            elif what == "disable":
+                if svc is not None:
+                    svc.stop()
+                self.align_service = None
+                self._ai_set(False)
+                self._log("Align: switched off. Songs keep their found lyrics; switch it on again under "
+                          "Scores and alignment.")
+                if not (self.worker and self.worker.is_alive()):
+                    self.btn_stop.config(state="disabled")
+            else:
+                if svc is not None:
+                    svc.stop()
+                self.align_service = None
+                if self.worker and self.worker.is_alive():
+                    self._stop()
+                else:
+                    self.btn_stop.config(state="disabled")
+                self._log("Align: run cancelled.")
+        theme.hint(ttk.Button(row, text="Ignore and keep aligning", command=lambda: choose("ignore"),
+                              style="Accent.TButton" if theme._state["sv"] else "TButton"),
+                   "Skip the song that failed and align the waiting ones (the aligner is restarted).").pack(
+            side="left")
+        theme.hint(ttk.Button(row, text="Stop using alignment", command=lambda: choose("disable")),
+                   "Switch Align low-confidence lyrics off. Finding carries on; songs keep their found lyrics.").pack(
+            side="left", padx=8)
+        theme.hint(ttk.Button(row, text="Cancel the run", command=lambda: choose("cancel")),
+                   "Stop finding and aligning now (after the current song).").pack(side="left")
+        dlg.protocol("WM_DELETE_WINDOW", lambda: choose("ignore"))
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_reqheight()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
 
     def set_score_levels(self, confident: int | None = None, fit: int | None = None) -> None:
         """Change the High confidence / Good fit levels (from the Find tab or the list's header filters)."""
@@ -945,13 +1024,13 @@ class App(tk.Tk):
                 return
             self.cancel.set()
             self.worker.join(timeout=10)
-        for name in ("align_cancel", "ai_install_cancel"):
-            ev = getattr(self, name, None)
-            if ev is not None:
-                ev.set()
-        aw = getattr(self, "align_worker", None)
-        if aw is not None and aw.is_alive():
-            aw.join(timeout=10)
+        ev = getattr(self, "ai_install_cancel", None)
+        if ev is not None:
+            ev.set()
+        svc = self._align_service(create=False)
+        if svc is not None:
+            svc.stop()
+            svc.join(timeout=10)
         self.review.shutdown()
         self.save_session_now()
         try:
@@ -1021,7 +1100,7 @@ class App(tk.Tk):
         elif t == "scan":
             self.progress.stop()
             self.progress.config(mode="determinate", maximum=max(1, e["total"]), value=0)
-        elif t in ("align_start", "align_progress", "align_done"):
+        elif t in ("align_progress", "align_error", "align_idle"):
             self._align_event(e)
         elif t == "ai_installed":
             if e["ok"]:
@@ -1092,6 +1171,10 @@ class App(tk.Tk):
                 self.show_apply_bar()
             if r.status == "proposed" and not getattr(self, "_switched_to_review", True):
                 self._first_reviewable(r.path)
+            if r.status == "proposed" and self.settings.ai_align:
+                from .ai_align import is_low_confidence
+                if is_low_confidence(self.settings, r.score, r.fit):
+                    self.queue_alignment([r.path])            # aligned on the GPU while Find carries on
             if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > max(
                     1.5, 10 * getattr(self, "_apply_bar_cost", 0.0)):
                 self.refresh_apply_bar(background=True)
@@ -1133,7 +1216,10 @@ class App(tk.Tk):
                 self.review.tree.selection_set(first)
                 self.review.tree.see(first)
             if self.settings.ai_align and not e["cancelled"]:
-                self.align_paths(None, everything=False)      # then the low-confidence ones on the GPU
+                self.align_paths(None, everything=False)      # also low-confidence songs from earlier runs
+                svc = self._align_service(create=False)
+                if svc is not None and not svc.idle():
+                    self.btn_stop.config(state="normal")
         elif t == "fatal":
             self.progress.stop()
             self._set_running(False)

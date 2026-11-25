@@ -121,7 +121,7 @@ Off by default. Switch it on under **Scores and alignment** on the Find lyrics t
   - The add-on is PyTorch with CUDA, Whisper (via stable-ts) and Demucs, about 3 GB.
   - The speech and vocal-separation models, about 1.6 GB more, download the first time it runs.
 
-After **Find lyrics**, songs whose found lyrics are below **High confidence** or **Good fit** (and have no per-file choice) are aligned one at a time. For each song:
+While **Find lyrics** runs, songs whose found lyrics are below **High confidence** or **Good fit** (and have no per-file choice) are queued and aligned one at a time on the GPU. Finding carries on meanwhile, and low-confidence songs from earlier runs are added when Find finishes. For each song:
 1. Demucs isolates the vocals.
 2. Whisper locates each lyric word in them, with a probability for each.
 3. Lines whose words were heard clearly are placed where they were heard. The rest are interpolated between them, the same as *Interpolate from pins*.
@@ -133,6 +133,13 @@ After **Find lyrics**, songs whose found lyrics are below **High confidence** or
 - The original timing stays available in the player as **Original timing**.
 
 **If it doesn't pass,** the song keeps its found lyrics unchanged. The activity log says why.
+
+**If the aligner fails** (for example the GPU runs out of memory, the add-on is damaged, or the GPU can't be found), alignment pauses and a window explains the error. Finding carries on, and songs that need aligning keep queueing. The song that failed keeps its found lyrics. Choose:
+- **Ignore and keep aligning:** skip that song, restart the aligner, and work through the queue.
+- **Stop using alignment:** switch the option off. Finding carries on, and queued songs keep their found lyrics.
+- **Cancel the run:** stop finding and aligning.
+
+If 3 songs in a row fail on their own (unreadable files, say), the same window appears.
 
 Songs are aligned only once for the same lyrics. To align particular songs regardless of their scores, select them and use **right-click → Align on the GPU**. **Stop** stops the alignment after the current song.
 

@@ -152,3 +152,82 @@ def test_worker_script_answers_check_without_torch():
                        timeout=120)
     info = json.loads(r.stdout.strip().splitlines()[-1])
     assert info["ok"] is False and "error" in info
+
+
+def _wait(cond, n=600):
+    import time
+    for _ in range(n):
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_service_pauses_on_failure_queues_and_resumes(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    d = settings.music_folder
+    songs = [make_track(os.path.join(d, f"{i}.flac"), "flac", title=f"Tune{i} Song") for i in range(4)]
+    _find(settings, [record(title=f"Tune{i} Song (Live)", synced=LYR, duration=12) for i in range(4)])
+    events = []
+    starts = []
+
+    def factory(s):
+        starts.append(1)
+        if len(starts) == 1:                     # the first worker can't start (e.g. no CUDA)
+            return ai_align.Aligner(command=[sys.executable, "-c",
+                                             "print('{\"ready\": false, \"error\": \"CUDA error: out of memory\"}')"])
+        return ai_align.Aligner(command=fake_cmd())
+    svc = ai_align.AlignService(lambda: settings, events.append, factory)
+    assert svc.submit(songs[:2]) == 2
+    assert _wait(lambda: any(e["type"] == "align_error" for e in events))
+    err = next(e for e in events if e["type"] == "align_error")
+    assert "out of memory" in err["error"] and svc.paused
+    assert svc.submit(songs[2:]) == 2                       # Find carries on: songs keep queueing
+    assert svc.pending() == 3                               # the failed one was skipped, 3 waiting
+    failed = [e for e in events if e["type"] == "align_progress" and e["status"] == "error"]
+    assert len(failed) == 1 and failed[0]["path"] == songs[0]
+    svc.resume()                                            # "Ignore and keep aligning"
+    assert _wait(lambda: svc.idle() and sum(1 for e in events if e.get("status") == "aligned") == 3)
+    assert svc.counts == {"aligned": 3, "rejected": 0, "error": 1, "skipped": 0}
+    st = State(settings.resolved_state_db())
+    try:
+        assert lrc.same_lyrics(st.get_pending(songs[0])[2], LYR)            # the failed song is untouched
+        assert [t for t, _ in lrc.display_lines(st.get_pending(songs[3])[2])] == [2.0, 5.0, 8.0]
+    finally:
+        st.close()
+    svc.stop()
+    svc.join(5)
+    assert svc.submit(songs) == 0                           # stopped: nothing more is taken
+
+
+def test_service_stop_drops_the_queue(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: None)      # e.g. the GPU went away
+    songs = [make_track(os.path.join(settings.music_folder, f"{i}.flac"), "flac", title=f"Tune{i} Song")
+             for i in range(3)]
+    _find(settings, [record(title=f"Tune{i} Song (Live)", synced=LYR, duration=12) for i in range(3)])
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, lambda s: ai_align.Aligner(command=fake_cmd()))
+    svc.submit(songs)
+    assert _wait(lambda: svc.paused)
+    assert "NVIDIA" in next(e for e in events if e["type"] == "align_error")["error"]
+    svc.stop()
+    svc.join(5)
+    assert svc.pending() == 0 and not svc._thread.is_alive()
+
+
+def test_service_skips_songs_that_became_confident(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    good = make_track(os.path.join(settings.music_folder, "a.flac"), "flac")
+    _find(settings, [record(synced=LYR)])
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, lambda s: ai_align.Aligner(command=fake_cmd()))
+    svc.submit([good])                                       # 100% / 100%: not low confidence
+    assert _wait(lambda: any(e["type"] == "align_idle" for e in events))
+    assert not any(e["type"] == "align_progress" for e in events)
+    svc.submit([good], force=True)                           # right-click → Align on the GPU
+    assert _wait(lambda: any(e.get("status") == "aligned" for e in events))
+    svc.stop()
+    svc.join(5)

@@ -386,15 +386,69 @@ def pick_low_confidence(settings, paths) -> list[str]:
     return out
 
 
+def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
+    """Align one song's proposal. Returns an align_progress-style dict (status aligned / rejected /
+    error / skipped). Raises AlignerError when the worker itself fails (not this song)."""
+    from . import fit as fitmod
+    from .paths import to_long_path
+    from .tags import TagFile
+
+    ev = {"type": "align_progress", "path": path, "status": "skipped", "verify": None, "reason": "",
+          "kind": "", "confidence": None, "fit": None}
+    pend = st.get_pending(path)
+    if pend is None or st.get_override(path) is not None:
+        return dict(ev, reason="nothing to align")
+    source, label, text = pend[0], pend[1], pend[2]
+    kind = "online" if source == "lrclib" else "local"
+    ev["kind"] = kind
+    h = _hash(text)
+    prev = st.get_aligned(path)
+    if prev is not None and prev[0] == h:                        # done before for these exact lyrics
+        if prev[1] and prev[4]:
+            st.use_aligned(path, kind, text, prev[4], label, prev[5], prev[6])
+            st.commit()
+            return dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
+                        reason="aligned before")
+        return dict(ev, status="rejected", verify=prev[2], reason=prev[3])
+    if prev is not None and prev[1] and prev[4] and lrcmod.same_lyrics(prev[4], text):
+        return dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
+                    reason="already aligned")
+    items = lyric_lines(text)
+    if len(items) < 2:
+        return dict(ev, reason="fewer than 2 timed lines")
+    try:
+        dur = TagFile(to_long_path(path)).duration
+    except Exception:
+        dur = None
+    result = al.align(path, [b for _, b in items], probe=items[0][0])       # AlignerError propagates
+    out = evaluate(text, result, dur, minimum)
+    if not out.ok:
+        if result.get("ok"):                     # a judgement about these lyrics: remember it
+            st.set_aligned(path, h, False, out.verify, out.reason, kind=kind)
+            st.commit()
+            return dict(ev, status="rejected", verify=out.verify, reason=out.reason)
+        return dict(ev, status="error", reason=out.reason)       # this song failed (bad file, …): retry later
+    peaks = fitmod.peaks_for(display_path(path))
+    new_fit = fitmod.fit_score(out.text, dur, dur, peaks)[0]
+    old_conf = st.pending_scores().get(path, (None, None))[0]
+    conf = round(max(old_conf or 0.0, out.verify), 1)
+    new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
+    if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit):
+        return dict(ev, reason="changed or saved meanwhile")
+    st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind)
+    st.commit()
+    return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit,
+                reason=f"{out.pins} of {out.lines} lines placed from the audio, the rest interpolated; "
+                       f"typical shift {out.moved:.2f} s")
+
+
 def run(settings, paths, emit, cancel: threading.Event | None = None, aligner: Aligner | None = None,
         everything: bool = False) -> dict:
-    """Align the low-confidence proposals among `paths` (all of them with everything=True) and keep
-    each re-timed result only when its verify score reaches settings.ai_align_min.
-    emit() gets align_start / align_progress / align_done events."""
-    from . import fit as fitmod
-    from .paths import state_key, to_long_path
+    """Align the low-confidence proposals among `paths` (all of them with everything=True), one after
+    another, and keep each re-timed result only when its verify score reaches settings.ai_align_min.
+    Stops at the first worker failure. emit() gets align_start / align_progress / align_done events."""
+    from .paths import state_key
     from .state import State
-    from .tags import TagFile
 
     cancel = cancel or threading.Event()
     minimum = float(getattr(settings, "ai_align_min", 70))
@@ -408,67 +462,16 @@ def run(settings, paths, emit, cancel: threading.Event | None = None, aligner: A
         for i, path in enumerate(todo, 1):
             if cancel.is_set():
                 break
-            ev = {"type": "align_progress", "path": path, "done": i, "total": len(todo), "status": "skipped",
-                  "verify": None, "reason": "", "kind": "", "confidence": None, "fit": None}
-            pend = st.get_pending(path)
-            if pend is None or st.get_override(path) is not None:
-                counts["skipped"] += 1
-                emit(dict(ev, reason="nothing to align"))
-                continue
-            source, label, text = pend[0], pend[1], pend[2]
-            kind = "online" if source == "lrclib" else "local"
-            ev["kind"] = kind
-            h = _hash(text)
-            prev = st.get_aligned(path)
-            items = lyric_lines(text)
             try:
-                dur = TagFile(to_long_path(path)).duration
-            except Exception:
-                dur = None
-            if prev is not None and prev[0] == h:            # done before for these exact lyrics
-                if prev[1] and prev[4]:
-                    st.use_aligned(path, kind, text, prev[4], label, prev[5], prev[6])
-                    counts["aligned"] += 1
-                    emit(dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
-                              reason="aligned before"))
-                else:
-                    counts["rejected"] += 1
-                    emit(dict(ev, status="rejected", verify=prev[2], reason=prev[3]))
-                st.commit()
-                continue
-            if len(items) < 2:
-                counts["skipped"] += 1
-                emit(dict(ev, reason="fewer than 2 timed lines"))
-                continue
-            try:
-                result = al.align(path, [b for _, b in items], probe=items[0][0])
+                ev = align_one(settings, path, al, st, minimum)
             except AlignerError as e:
                 counts["error"] += 1
-                emit(dict(ev, status="error", reason=str(e)))
-                break                                        # the worker is gone: stop the batch
-            out = evaluate(text, result, dur, minimum)
-            if not out.ok:
-                st.set_aligned(path, h, False, out.verify, out.reason, kind=kind)
-                counts["rejected" if result.get("ok") else "error"] += 1
-                emit(dict(ev, status="rejected" if result.get("ok") else "error", verify=out.verify,
-                          reason=out.reason))
-                st.commit()
-                continue
-            peaks = fitmod.peaks_for(display_path(path))
-            new_fit = fitmod.fit_score(out.text, dur, dur, peaks)[0]
-            old_conf = st.pending_scores().get(path, (None, None))[0]
-            conf = round(max(old_conf or 0.0, out.verify), 1)
-            new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
-            if st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit):
-                st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind)
-                counts["aligned"] += 1
-                emit(dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit,
-                          reason=f"{out.pins} of {out.lines} lines placed from the audio, the rest "
-                                 f"interpolated; typical shift {out.moved:.2f} s"))
-            else:
-                counts["skipped"] += 1
-                emit(dict(ev, reason="changed or saved meanwhile"))
-            st.commit()
+                emit({"type": "align_progress", "path": path, "done": i, "total": len(todo), "status": "error",
+                      "verify": None, "reason": str(e), "kind": "", "confidence": None, "fit": None})
+                break
+            counts[ev["status"]] += 1
+            ev.update(done=i, total=len(todo))
+            emit(ev)
     finally:
         st.close()
         if own:
@@ -476,3 +479,168 @@ def run(settings, paths, emit, cancel: threading.Event | None = None, aligner: A
     summary = {"type": "align_done", "counts": counts, "cancelled": cancel.is_set(), "total": len(todo)}
     emit(summary)
     return summary
+
+
+def is_low_confidence(settings, confidence: float | None, fit: float | None) -> bool:
+    return (confidence is not None and confidence < float(settings.confident_threshold)) or \
+        (fit is not None and fit < float(settings.confident_fit))
+
+
+class AlignService:
+    """Aligns songs in the background while Find keeps running. Songs are queued as they are found.
+    When the aligner fails it pauses (the queue keeps filling) and emits align_error; the app then
+    calls resume() (ignore the error and go on), disable() (stop using the feature) or stop()."""
+
+    PER_SONG_ERRORS_BEFORE_PAUSE = 3
+
+    def __init__(self, settings_fn, emit, aligner_factory=None):
+        from collections import deque
+        self._settings_fn = settings_fn
+        self._emit = emit
+        self._factory = aligner_factory or (lambda s: Aligner(getattr(s, "ai_align_model", "medium")))
+        self._q: "deque[tuple[str, bool]]" = deque()
+        self._queued: set[str] = set()
+        self._cv = threading.Condition()
+        self.paused = False
+        self.stopped = False
+        self.busy = False
+        self.counts = {"aligned": 0, "rejected": 0, "error": 0, "skipped": 0}
+        self.done = 0
+        self._thread: threading.Thread | None = None
+        self._aligner: Aligner | None = None
+
+    # -- control (any thread)
+    def submit(self, paths, force: bool = False) -> int:
+        from .paths import state_key
+        n = 0
+        with self._cv:
+            if self.stopped:
+                return 0
+            for p in paths:
+                k = state_key(p)
+                if k in self._queued:
+                    continue
+                self._queued.add(k)
+                self._q.append((k, force))
+                n += 1
+            self._cv.notify_all()
+        if n:
+            self._ensure_thread()
+        return n
+
+    def pending(self) -> int:
+        with self._cv:
+            return len(self._q)
+
+    def idle(self) -> bool:
+        with self._cv:
+            return not self._q and not self.busy
+
+    def resume(self) -> None:
+        with self._cv:
+            self.paused = False
+            self._cv.notify_all()
+
+    def stop(self) -> None:
+        """Finish the current song, drop the queue and shut the worker down."""
+        with self._cv:
+            self.stopped = True
+            self._q.clear()
+            self._queued.clear()
+            self._cv.notify_all()
+
+    def reset_counts(self) -> None:
+        self.counts = {k: 0 for k in self.counts}
+        self.done = 0
+
+    def join(self, timeout: float | None = None) -> None:
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+
+    # -- worker thread
+    def _ensure_thread(self) -> None:
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="msl-align")
+            self._thread.start()
+
+    IDLE_RELEASE = 120.0       # seconds with nothing to do before the worker (and its GPU memory) is let go
+
+    def _loop(self) -> None:
+        import time
+
+        from .state import State
+        st = None
+        streak = 0
+        idle_since = time.monotonic()
+        try:
+            while True:
+                with self._cv:
+                    while not self.stopped and (self.paused or not self._q):
+                        if self.busy and not self.paused:
+                            self.busy = False
+                            idle_since = time.monotonic()
+                            self._emit({"type": "align_idle", "counts": dict(self.counts), "done": self.done})
+                        if (self._aligner is not None and not self.paused
+                                and time.monotonic() - idle_since > self.IDLE_RELEASE):
+                            self._aligner.close()
+                            self._aligner = None
+                        self._cv.wait(1.0)
+                    if self.stopped:
+                        return
+                    path, force = self._q.popleft()
+                    self._queued.discard(path)
+                    self.busy = True
+                s = self._settings_fn()
+                if st is None:
+                    st = State(s.resolved_state_db())
+                if not force:
+                    c, f = st.pending_scores().get(path, (None, None))
+                    if not is_low_confidence(s, c, f):
+                        continue
+                try:
+                    if nvidia_gpu() is None:
+                        raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
+                    if self._aligner is None:
+                        self._aligner = self._factory(s)
+                    ev = align_one(s, path, self._aligner, st, float(getattr(s, "ai_align_min", 70)))
+                except Exception as e:                  # the aligner itself failed (or something unexpected)
+                    msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
+                    self._fail(path, msg)
+                    streak = 0
+                    continue
+                self.done += 1
+                self.counts[ev["status"]] += 1
+                ev["queued"] = self.pending()
+                self._emit(ev)
+                streak = streak + 1 if ev["status"] == "error" else 0
+                if streak >= self.PER_SONG_ERRORS_BEFORE_PAUSE:
+                    streak = 0
+                    self._pause(f"{self.PER_SONG_ERRORS_BEFORE_PAUSE} songs in a row could not be aligned. "
+                                f"Last: {ev['reason']}", path)
+        finally:
+            if self._aligner is not None:
+                self._aligner.close()
+                self._aligner = None
+            if st is not None:
+                st.close()
+            self.busy = False
+
+    def _fail(self, path: str, error: str) -> None:
+        """The aligner failed on this song: it keeps its found lyrics, the worker is restarted for the
+        next one, and alignment pauses until the user decides."""
+        if self._aligner is not None:
+            self._aligner.close()
+            self._aligner = None
+        self.done += 1
+        self.counts["error"] += 1
+        self._emit({"type": "align_progress", "path": path, "status": "error", "verify": None, "reason": error,
+                    "kind": "", "confidence": None, "fit": None, "queued": self.pending()})
+        self._pause(error, path)
+
+    def _pause(self, error: str, path: str) -> None:
+        with self._cv:
+            if self.stopped:
+                return
+            self.paused = True
+        self._emit({"type": "align_error", "error": error, "path": path, "queued": self.pending()})
