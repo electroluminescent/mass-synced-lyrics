@@ -126,6 +126,10 @@ class App(tk.Tk):
         self.v_lrc_action = tk.StringVar()
         self.v_mtime = tk.BooleanVar()
         self.v_threshold = tk.IntVar()
+        self.v_confident = tk.IntVar()
+        self.v_fit = tk.IntVar()
+        self.v_fit_audio = tk.BooleanVar()
+        self.v_only_found = tk.BooleanVar()
         self.v_retry = tk.BooleanVar()
         sw = "Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
         r = 1
@@ -149,6 +153,7 @@ class App(tk.Tk):
                         command=lambda: self.ent_key.config(show="" if self.v_showkey.get() else "•")
                         ), 'Show or hide the key.').grid(row=0, column=2, padx=(8, 0))
         for label, widget in (("After using a sidecar .lrc", "action"), ("Match confidence (70–100)", "thr"),
+                              ("High confidence (50–100)", "conf"), ("Good fit (0–100)", "fit"),
                               ("When the app starts", "session")):
             ttk.Label(opt, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
             if widget == "action":
@@ -157,6 +162,24 @@ class App(tk.Tk):
             elif widget == "thr":
                 theme.hint(ttk.Spinbox(opt, from_=70, to=100, textvariable=self.v_threshold, width=8
                             ), 'How closely names must match for a sidecar or collection .lrc to be used automatically. Lower finds more, higher is stricter.').grid(row=r, column=1, sticky="w")
+            elif widget == "conf":
+                sp = theme.hint(ttk.Spinbox(opt, from_=50, to=100, textvariable=self.v_confident, width=8,
+                                            command=self._confident_changed),
+                                "Songs whose found lyrics match at this % or better count as high confidence: "
+                                "Apply confident writes them without asking, and Hide low confidence hides the "
+                                "rest. 100% = exact title, artist, album and length.")
+                sp.grid(row=r, column=1, sticky="w")
+                sp.bind("<FocusOut>", lambda e: self._confident_changed(), add="+")
+                sp.bind("<Return>", lambda e: self._confident_changed(), add="+")
+            elif widget == "fit":
+                sp = theme.hint(ttk.Spinbox(opt, from_=0, to=100, textvariable=self.v_fit, width=8,
+                                            command=self._confident_changed),
+                                "Found lyrics fit the recording well at this % or better (length, lines past the end, "
+                                "spread over the song, lines on silence). Apply confident needs both High confidence "
+                                "and Good fit; Hide low confidence hides songs below either.")
+                sp.grid(row=r, column=1, sticky="w")
+                sp.bind("<FocusOut>", lambda e: self._confident_changed(), add="+")
+                sp.bind("<Return>", lambda e: self._confident_changed(), add="+")
             else:
                 self.cmb_session = theme.hint(ttk.Combobox(opt, state="readonly", values=[v for _, v in SESSION_MODES]), 'What to do with the last review session when the app opens.')
                 self.cmb_session.grid(row=r, column=1, sticky="ew")
@@ -177,7 +200,15 @@ class App(tk.Tk):
                                  "After writing, put each file's modified date back so cloud sync and music "
                                  "libraries don't treat it as changed."),
                                 ("Retry songs not found in earlier runs", self.v_retry,
-                                 "Search online again for songs that had no lyrics last time.")):
+                                 "Search online again for songs that had no lyrics last time."),
+                                ("Check lyrics against the audio (slower)", self.v_fit_audio,
+                                 "While finding, decode each song with found lyrics to see whether lines start on "
+                                 "silence or run into the silence at the end; this sharpens the Fit score. Songs "
+                                 "opened in the player are always checked."),
+                                ("List only songs with lyrics found", self.v_only_found,
+                                 "Review & player lists only the songs that have lyrics to write. Songs with "
+                                 "nothing found (or already synced) are left out. Turn the list's Lyrics found "
+                                 "box off to see them.")):
             theme.hint(ttk.Checkbutton(opt, text=text, variable=var, style=sw), tip).grid(
                 row=r, column=0, columnspan=2, sticky="w", pady=2); r += 1
 
@@ -264,6 +295,10 @@ class App(tk.Tk):
         self.cmb_action.set(dict(LRC_ACTIONS).get(s.lrc_action, LRC_ACTIONS[0][1]))
         self.v_mtime.set(s.restore_mtime)
         self.v_threshold.set(s.match_threshold)
+        self.v_confident.set(int(s.confident_threshold))
+        self.v_fit.set(int(s.confident_fit))
+        self.v_fit_audio.set(bool(s.fit_audio))
+        self.v_only_found.set(bool(s.only_found))
         self.v_retry.set(s.retry_misses)
         self.v_output.set(s.output_mode if s.output_mode in ("embed", "lrc") else "embed")
         self.cmb_session.set(dict(SESSION_MODES).get(s.session_restore, SESSION_MODES[0][1]))
@@ -286,6 +321,10 @@ class App(tk.Tk):
         except (tk.TclError, ValueError):
             s.match_threshold = 90
         s.retry_misses = self.v_retry.get()
+        s.confident_threshold = self._confident_value()
+        s.confident_fit = self._fit_value()
+        s.fit_audio = bool(self.v_fit_audio.get())
+        s.only_found = bool(self.v_only_found.get())
         s.output_mode = self.v_output.get()
         s.session_restore = next((k for k, v in SESSION_MODES if v == self.cmb_session.get()), "ask")
         s.tidy_trim = bool(self.v_trim.get())
@@ -335,6 +374,9 @@ class App(tk.Tk):
         save_settings(s)
         s = dataclasses.replace(s, dry_run=True)   # find only; the bottom bar writes
         self._switched_to_review = False
+        if bool(self.review.v_only_found.get()) != s.only_found:
+            self.review.v_only_found.set(s.only_found)
+            self.review._refill()
         self.cancel = threading.Event()
         self._set_running(True)
         self._clear_log()
@@ -378,6 +420,11 @@ class App(tk.Tk):
         self.btn_apply_all = theme.hint(ttk.Button(row, text="Apply", command=self._apply_all,
                                         style="Accent.TButton" if theme._state["sv"] else "TButton"), 'Write the chosen lyrics for every song in the list that has something to write. To write just some songs, select them and right-click → Save now.')
         self.btn_apply_all.pack(side="right")
+        self.btn_apply_conf = theme.hint(ttk.Button(row, text="Apply confident", command=self._apply_confident),
+                                         "Write, without asking, the found lyrics at or above both the High "
+                                         "confidence and Good fit levels (Find lyrics tab). Songs with your own "
+                                         "choices or edits are left for Apply.")
+        self.btn_apply_conf.pack(side="right", padx=(0, 8))
         self.btn_apply_stop = theme.hint(ttk.Button(row, text="Stop", command=self._apply_stop), 'Stop applying after the current song.')
         self.apply_progress = ttk.Progressbar(row, mode="determinate", length=160)
         self.v_apply = tk.StringVar(value="")
@@ -395,22 +442,47 @@ class App(tk.Tk):
     def _session_paths(self) -> list[str]:
         return list(self.review.rows.keys())
 
-    def refresh_apply_bar(self) -> None:
+    def refresh_apply_bar(self, background: bool = False) -> None:
+        """Update the Apply / Apply confident counts. With background=True (used while finding, for big
+        lists) the database is read on a helper thread and the bar updates when it's done."""
         if not getattr(self, "_apply_bar_shown", False):
             return
         if self.apply_worker and self.apply_worker.is_alive():
             return
-        try:
-            from .applier import plan
+        self._apply_bar_refreshed = time.monotonic()
+        paths = self._session_paths()
+        settings = dataclasses.replace(self.settings)
 
-            n = len(plan(self.settings, self._session_paths()))
-        except Exception:
-            n = 0
+        def count():
+            t0 = time.monotonic()
+            try:
+                from .applier import plan_counts
+
+                n, nc = plan_counts(settings, paths)
+            except Exception:
+                n = nc = 0
+            return n, nc, time.monotonic() - t0
+
+        if background and len(paths) > 2000:
+            prev = getattr(self, "_count_worker", None)
+            if prev is not None and prev.is_alive():
+                return
+            self._count_worker = threading.Thread(
+                target=lambda: self.events.put({"type": "apply_counts", "counts": count()}), daemon=True)
+            self._count_worker.start()
+            return
+        self._set_apply_counts(*count())
+
+    def _set_apply_counts(self, n: int, nc: int, cost: float = 0.0) -> None:
+        # big lists make counting slower: during a run, refresh at most every 1.5 s or 10x its own cost
+        self._apply_bar_cost = cost
+        if self.apply_worker and self.apply_worker.is_alive():
+            return
         running = bool(self.worker and self.worker.is_alive())
         target = "embed into" if self.v_output.get() == "embed" else "save .lrc for"
         self.v_apply.set(f"{n} file(s) ready" + (" — still finding…" if running else ""))
         self.btn_apply_all.config(text=f"Apply: {target} {n} file(s)", state="normal" if n else "disabled")
-        self._apply_bar_refreshed = time.monotonic()
+        self.btn_apply_conf.config(text=f"Apply confident ({nc})", state="normal" if nc else "disabled")
 
     def _first_reviewable(self, path: str) -> None:
         """The first song with lyrics to look at: open it in Review & player while the rest load."""
@@ -438,7 +510,43 @@ class App(tk.Tk):
     def _apply_all(self) -> None:
         self.apply_paths(None)
 
-    def apply_paths(self, paths: list[str] | None) -> None:
+    def _confident_value(self) -> int:
+        try:
+            return max(50, min(100, int(self.v_confident.get())))
+        except (tk.TclError, ValueError):
+            return 95
+
+    def _fit_value(self) -> int:
+        try:
+            return max(0, min(100, int(self.v_fit.get())))
+        except (tk.TclError, ValueError):
+            return 80
+
+    def _confident_changed(self) -> None:
+        v, f = self._confident_value(), self._fit_value()
+        if v == self.settings.confident_threshold and f == self.settings.confident_fit:
+            return
+        self.settings.confident_threshold = v
+        self.settings.confident_fit = f
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+        self.review._refill()
+        self.refresh_apply_bar()
+
+    def _apply_confident(self) -> None:
+        """Write the high-confidence proposals straight away (no confirmation)."""
+        if self.apply_worker and self.apply_worker.is_alive():
+            return
+        from .applier import plan_confident
+
+        s = self._collect_settings()
+        paths = plan_confident(s, self._session_paths())
+        if paths:
+            self.apply_paths(paths, confirm=False)
+
+    def apply_paths(self, paths: list[str] | None, confirm: bool = True) -> None:
         """Write lyrics for these songs now (None = every song in the list)."""
         if self.apply_worker and self.apply_worker.is_alive():
             return
@@ -460,12 +568,13 @@ class App(tk.Tk):
             msg += "\n\nUsed sidecar .lrc files will be permanently deleted."
         elif s.lrc_action == "recycle":
             msg += "\n\nUsed sidecar .lrc files will be moved to the Recycle Bin."
-        if not messagebox.askyesno(APP_TITLE, msg):
+        if confirm and not messagebox.askyesno(APP_TITLE, msg):
             return
         save_settings(s)
         self.review.player.stop()
         self.apply_cancel = threading.Event()
         self.btn_apply_all.config(state="disabled")
+        self.btn_apply_conf.config(state="disabled")
         self.btn_start.config(state="disabled")
         self.apply_progress.config(value=0, maximum=max(1, n))
         self.apply_progress.pack(side="right", padx=6)
@@ -495,6 +604,7 @@ class App(tk.Tk):
         self.review.player.stop()
         self.apply_cancel = threading.Event()
         self.btn_apply_all.config(state="disabled")
+        self.btn_apply_conf.config(state="disabled")
         self.btn_start.config(state="disabled")
         self.apply_progress.config(value=0, maximum=max(1, len(paths)))
         self.apply_progress.pack(side="right", padx=6)
@@ -513,20 +623,37 @@ class App(tk.Tk):
     def session_changed(self) -> None:
         self._session_dirty = True
 
-    def save_session_now(self) -> None:
+    def save_session_now(self, background: bool = False) -> None:
         if not self.review.rows:
             return
         from .session import save_session
         d = self.review.session_data()
-        try:
-            save_session(d["rows"], d["selected"], d["filter"], d["search"], self.settings.music_folder)
-            self._session_dirty = False
-        except OSError:
-            pass
+        rows = {p: dict(r) for p, r in d["rows"].items()}       # a snapshot, so writing can run alongside
+        extra = {k: v for k, v in d.items() if k not in ("rows", "selected", "filter", "search")}
+        args = (rows, d["selected"], d["filter"], d["search"], self.settings.music_folder)
+        self._session_dirty = False
+
+        def write():
+            try:
+                save_session(*args, extra=extra)
+            except OSError:
+                self._session_dirty = True
+        if background:
+            prev = getattr(self, "_session_writer", None)
+            if prev is not None and prev.is_alive():
+                self._session_dirty = True                        # still writing the last one: next time
+                return
+            self._session_writer = threading.Thread(target=write, daemon=True)
+            self._session_writer.start()
+        else:
+            prev = getattr(self, "_session_writer", None)
+            if prev is not None and prev.is_alive():
+                prev.join(10)
+            write()
 
     def _autosave_session(self) -> None:
         if self._session_dirty:
-            self.save_session_now()
+            self.save_session_now(background=True)
         self.after(30000, self._autosave_session)
 
     def _offer_session(self) -> None:
@@ -638,8 +765,22 @@ class App(tk.Tk):
         self._log(text)
 
     def _log(self, text: str) -> None:
+        """Queue a line for the activity log; lines are written in one go per batch of events."""
+        buf = getattr(self, "_log_buf", None)
+        if buf is None:
+            buf = self._log_buf = []
+        buf.append(text)
+        if len(buf) == 1:
+            self.after_idle(self._flush_log)
+
+    def _flush_log(self) -> None:
+        buf = getattr(self, "_log_buf", None)
+        if not buf:
+            return
+        lines_in = buf[-MAX_LOG_LINES:]
+        self._log_buf = []
         self.txt.config(state="normal")
-        self.txt.insert("end", text + "\n")
+        self.txt.insert("end", "\n".join(lines_in) + "\n")
         lines = int(self.txt.index("end-1c").split(".")[0])
         if lines > MAX_LOG_LINES:
             self.txt.delete("1.0", f"{lines - MAX_LOG_LINES}.0")
@@ -647,6 +788,7 @@ class App(tk.Tk):
         self.txt.config(state="disabled")
 
     def _clear_log(self) -> None:
+        self._log_buf = []
         self.txt.config(state="normal")
         self.txt.delete("1.0", "end")
         self.txt.config(state="disabled")
@@ -668,6 +810,8 @@ class App(tk.Tk):
         elif t == "scan":
             self.progress.stop()
             self.progress.config(mode="determinate", maximum=max(1, e["total"]), value=0)
+        elif t == "apply_counts":
+            self._set_apply_counts(*e["counts"])
         elif t.startswith("review_"):
             self.review.handle(e)
         elif t == "apply_start":
@@ -720,20 +864,18 @@ class App(tk.Tk):
             r = e["result"]
             self.progress.config(value=e["done"])
             m = r.meta
-            if r.status == "cached":    # finished in an earlier run: still list it for review
-                self.review.add_row(r.path, r.detail, r.source, m.artist if m else "", m.title if m else "",
-                                    r.local, r.online, r.choice, m.album if m else "")
-                if not self._apply_bar_shown:
-                    self.show_apply_bar()
+            # cached = finished in an earlier run: still listed for review (its detail holds the status)
+            self.review.add_row(r.path, r.detail if r.status == "cached" else r.status, r.source,
+                                m.artist if m else "", m.title if m else "", r.local, r.online, r.choice,
+                                m.album if m else "", r.conf_local, r.conf_online, r.fit_local, r.fit_online)
+            if not self._apply_bar_shown:
+                self.show_apply_bar()
+            if r.status == "proposed" and not getattr(self, "_switched_to_review", True):
+                self._first_reviewable(r.path)
+            if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > max(
+                    1.5, 10 * getattr(self, "_apply_bar_cost", 0.0)):
+                self.refresh_apply_bar(background=True)
             if r.status != "cached":
-                self.review.add_row(r.path, r.status, r.source, m.artist if m else "", m.title if m else "",
-                                    r.local, r.online, r.choice, m.album if m else "")
-                if not self._apply_bar_shown:
-                    self.show_apply_bar()
-                if r.status == "proposed" and not getattr(self, "_switched_to_review", True):
-                    self._first_reviewable(r.path)
-            if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > 1.5:
-                self.refresh_apply_bar()
                 label = STATUS_LABELS.get(r.status, r.status)
                 src = f" [{r.source}]" if r.source and r.status == "embedded" else ""
                 det = f" — {r.detail}" if r.detail else ""

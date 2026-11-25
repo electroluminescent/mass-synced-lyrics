@@ -77,6 +77,9 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     rv = app.review
     app.nb.select(rv)
     rv.add_row(p, "has_synced", "", "Some Artist", "Some Song")
+    assert not rv.tree.exists(p)                       # nothing found: hidden by "Lyrics found"
+    rv.v_only_found.set(False)
+    rv._refill()
     rv.player.silent_reason = "test"
 
     def pump(cond, n=300):
@@ -253,6 +256,9 @@ def test_review_table_groups_choices_pins_and_scrub(settings, tmp_path, monkeypa
 
     ka, kb, kc = state_key(a), state_key(b), state_key(c)
     ra, rb, rc = rv.rows[ka], rv.rows[kb], rv.rows[kc]
+    assert rv.tree.exists(ka) and rv.tree.exists(kb) and not rv.tree.exists(kc)   # only songs with lyrics
+    rv.v_only_found.set(False)
+    rv._refill()
     assert (ra["local"], ra["online"], ra["choice"]) == ("sidecar", "found", "local")
     assert (rb["local"], rb["online"], rb["choice"]) == ("", "found", "online")
     assert (rc["online"], rc["choice"]) == ("not found", "keep")
@@ -498,4 +504,135 @@ def test_switches_to_review_on_first_result_and_allows_saving_while_finding(sett
     busy.set()
     app.worker.join(1)
     app.review.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_apply_confident_button_and_list_filters(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import gui
+    from mass_synced_lyrics.engine import Engine
+
+    d = settings.music_folder
+    exact = make_track(os.path.join(d, "a.flac"), "flac")
+    loose = make_track(os.path.join(d, "b.flac"), "flac", title="Other Tune")
+    none = make_track(os.path.join(d, "c.flac"), "flac", title="Missing")
+    settings.dry_run = True
+    app = new_app(settings)
+    rv = app.review
+    assert rv.v_only_found.get() and app.v_only_found.get()          # on by default
+    events = []
+    Engine(settings, events.append, lrclib=FakeLrclib([record(), record(title="Other Tune (Live)")])).run()
+    for e in events:
+        app._handle(e)
+    app.update()
+    ke, kl, kn = state_key(exact), state_key(loose), state_key(none)
+    assert rv.tree.exists(ke) and rv.tree.exists(kl) and not rv.tree.exists(kn)
+    assert rv.tree.set(ke, "match") == "100%" and rv.tree.set(ke, "fit") == "100%"   # fit from Find
+    rv.v_hide_low.set(True)
+    rv._filter_toggled("hide_low_confidence", rv.v_hide_low)
+    assert rv.tree.exists(ke) and not rv.tree.exists(kl)
+    assert app.settings.hide_low_confidence
+    app.refresh_apply_bar()
+    assert app.btn_apply_conf.cget("text") == "Apply confident (1)"
+
+    def no_dialog(*a, **k):
+        raise AssertionError("Apply confident must not ask")
+    monkeypatch.setattr(gui.messagebox, "askyesno", no_dialog)
+    app._apply_confident()
+    for _ in range(300):
+        app.update()
+        if app.apply_worker is None:
+            break
+        app.after(10)
+    assert TagFile(exact).read().lyrics and not TagFile(loose).read().lyrics
+    assert rv.rows[ke]["status"] == "embedded"
+    rv.v_hide_saved.set(True)
+    rv._filter_toggled("hide_saved", rv.v_hide_saved)
+    assert not rv.tree.exists(ke)
+    rv.v_hide_low.set(False)
+    rv.v_only_found.set(False)
+    rv._filter_toggled("", rv.v_only_found)
+    assert rv.tree.exists(kl) and rv.tree.exists(kn) and not rv.tree.exists(ke)
+    app.v_confident.set(60)                                           # lower the bar
+    app._confident_changed()
+    assert app.btn_apply_conf.cget("text") == "Apply confident (1)"
+    rv.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_fit_column_header_filters_folder_view_and_open_location(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    from mass_synced_lyrics import paths as pathsmod
+    from mass_synced_lyrics import review_ui
+
+    app = new_app(settings)
+    rv = app.review
+    d = settings.music_folder
+    songs = []
+    for i, (fit, conf) in enumerate([(95.0, 100.0), (60.0, 100.0), (85.0, 88.0)]):
+        p = os.path.join(d, "Band", f"Album {i % 2}", f"{i:02d}.flac")
+        rv.add_row(p, "proposed", "lrclib", "Band", f"Song {i}", "", "found", "online", f"Album {i % 2}",
+                   conf_online=conf, fit_online=fit)
+        songs.append(state_key(p))
+    app.update()
+    assert [rv.tree.set(p, "fit") for p in songs] == ["95%", "60%", "85%"]
+    grp = rv.tree.parent(rv.tree.parent(songs[0]))
+    assert rv.tree.set(grp, "status") == "3 songs" and rv.tree.set(grp, "fit") == "1 poor"
+    assert rv.tree.set(grp, "match") == "1 low"
+    # Fit header → slider popup; the filter hides songs below it
+    rv._score_filter_popup("fit")
+    app.update()
+    assert rv._score_popup is not None and rv._score_popup.winfo_exists()
+    rv.set_min_score("fit", 80)
+    assert rv.tree.heading("fit", "text") == "Fit ≥80" and app.settings.list_min_fit == 80
+    assert not rv.tree.exists(songs[1]) and rv.tree.exists(songs[2])
+    assert rv.v_count.get() == "2 shown / 3 songs"
+    rv.set_min_score("match", 90)
+    assert [rv.tree.exists(p) for p in songs] == [True, False, False]
+    rv.set_min_score("match", 0)
+    rv.set_min_score("fit", 0)
+    rv._score_filter_popup("fit")                     # second click closes it
+    assert rv._score_popup is None
+    assert rv.v_count.get() == "3 shown / 3 songs"
+    # folder view: music folder ▸ Band ▸ Album n ▸ song
+    rv.v_view.set(review_ui.VIEWS["folder"])
+    rv._view_changed()
+    parent = rv.tree.parent(songs[0])
+    assert rv.tree.item(parent, "text") == "Album 0" and rv.group_folder(parent) == os.path.join(d, "Band", "Album 0")
+    top = rv.tree.get_children("")
+    assert len(top) == 1 and rv.tree.item(top[0], "text") == os.path.basename(d)
+    assert rv.tree.set(top[0], "status") == "3 songs"
+    assert app.settings.list_view == "folder"
+    opened = []
+    monkeypatch.setattr(review_ui, "open_folder", lambda f: opened.append(("folder", f)))
+    monkeypatch.setattr(review_ui, "reveal_in_explorer", lambda f: opened.append(("file", f)))
+    rv.open_location(parent)
+    rv.open_location(songs[1])
+    assert opened == [("folder", os.path.join(d, "Band", "Album 0")), ("file", songs[1])]
+    # artist view: the album row opens the folder its songs share
+    rv.v_view.set(review_ui.VIEWS["artist"])
+    rv._view_changed()
+    album = rv.tree.parent(songs[0])
+    assert rv.group_folder(album) == os.path.join(d, "Band", "Album 0")
+    assert rv.group_folder(rv.tree.parent(album)) == os.path.join(d, "Band")
+    # a song leaving the list updates the totals of its groups
+    rv.v_hide_saved.set(True)
+    rv._filter_toggled("hide_saved", rv.v_hide_saved)
+    rv.add_row(songs[0], "embedded")
+    app.update()
+    assert not rv.tree.exists(songs[0]) and rv.tree.set(rv.tree.parent(album), "status") == "2 songs"
+    calls = []
+    monkeypatch.setattr(pathsmod, "_launch", lambda args, shell=None: calls.append((args, shell)))
+    pathsmod.reveal_in_explorer(songs[1])
+    if os.name == "nt":
+        assert calls[0][1].startswith("explorer /select,") and os.path.normpath(songs[1]) in calls[0][1]
+    else:
+        assert os.path.dirname(songs[1]) in str(calls[0])
+    rv.shutdown()
     app.destroy()

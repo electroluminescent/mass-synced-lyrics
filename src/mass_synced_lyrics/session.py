@@ -15,11 +15,12 @@ def session_path() -> str:
 
 
 def save_session(rows: dict, selected: str = "", filter_name: str = "", search: str = "",
-                 music_folder: str = "", path: str | None = None) -> None:
+                 music_folder: str = "", path: str | None = None, extra: dict | None = None) -> None:
     path = path or session_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    data = {"version": VERSION, "saved": time.time(), "music_folder": music_folder, "selected": selected,
-            "filter": filter_name, "search": search, "rows": rows}
+    data = dict(extra or {})
+    data.update({"version": VERSION, "saved": time.time(), "music_folder": music_folder, "selected": selected,
+                 "filter": filter_name, "search": search, "rows": rows})
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False)

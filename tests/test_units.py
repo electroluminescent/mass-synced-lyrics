@@ -160,3 +160,27 @@ def test_tidy_trim_and_straighten():
     assert both.splitlines()[3] == "plain"
     assert lrc.tidy(t) == t and lrc.tidy(None, True, True) is None
     assert lrc.tidy(both, True, True) == both                       # idempotent
+
+
+def test_fit_score():
+    import numpy as np
+
+    from mass_synced_lyrics.fit import fit_score
+    text = "\n".join(f"[{m:02d}:{s:02d}.00]line {i}" for i, (m, s) in
+                     enumerate([(0, 10), (0, 40), (1, 10), (1, 40), (2, 10), (2, 40), (3, 0)]))
+    assert fit_score(text, 200.0, 200.0) == (100.0, [])
+    f, why = fit_score(text, 200.0, 205.0)                       # timed for a 5 s longer version
+    assert f == 73.0 and "longer" in why[0]
+    f, why = fit_score(text, 150.0)                              # last line after the end
+    assert f <= 50 and "after the song ends" in why[0]
+    f, _ = fit_score(text, 600.0)                                # lyrics only in the first third
+    assert f == 85.0
+    assert fit_score("plain words", 200.0) == (None, [])
+    assert fit_score(text, None) == (None, [])
+    # audio: loud from 0-120 s, then silence; lines at 130+ s start on silence and run into the end silence
+    peaks = np.zeros(200 * 100, dtype=np.float32)
+    peaks[: 120 * 100] = 0.8
+    f, why = fit_score(text, 200.0, 200.0, peaks)
+    assert f < 70 and any("silence" in w for w in why)
+    peaks[:] = 0.8
+    assert fit_score(text, 200.0, 200.0, peaks)[0] == 100.0

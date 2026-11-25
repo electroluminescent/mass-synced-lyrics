@@ -107,6 +107,57 @@ class _PathLocks:
             return self._locks.setdefault(key, threading.Lock())
 
 
+def plan_counts(settings: Settings, paths: Iterable[str]) -> tuple[int, int]:
+    """(songs Apply would write, songs Apply confident would write), from one read of the database."""
+    thr = float(settings.confident_threshold)
+    fthr = float(getattr(settings, "confident_fit", 80))
+    st = State(settings.resolved_state_db())
+    try:
+        scores = st.pending_scores()
+        kinds = st.override_kinds()
+    finally:
+        st.close()
+    n = nc = 0
+    for p in paths:
+        k = state_key(p)
+        kind = kinds.get(k)
+        if kind == KEEP:
+            continue
+        if kind == PIN:
+            n += 1
+            continue
+        sc = scores.get(k)
+        if sc is None:
+            continue
+        n += 1
+        c, f = sc
+        if c is not None and c >= thr and f is not None and f >= fthr:
+            nc += 1
+    return n, nc
+
+
+def plan_confident(settings: Settings, paths: Iterable[str], threshold: float | None = None,
+                   min_fit: float | None = None) -> list[str]:
+    """Songs that can be written without review: no per-file choice, found lyrics whose match is at
+    `threshold`% or better (default settings.confident_threshold) and whose fit with the recording is at
+    `min_fit`% or better (default settings.confident_fit)."""
+    thr = float(settings.confident_threshold if threshold is None else threshold)
+    fthr = float(getattr(settings, "confident_fit", 80) if min_fit is None else min_fit)
+    st = State(settings.resolved_state_db())
+    try:
+        scores = st.pending_scores()
+        kinds = st.override_kinds()
+    finally:
+        st.close()
+    out = []
+    for p in paths:
+        k = state_key(p)
+        c, f = scores.get(k, (None, None))
+        if k not in kinds and c is not None and c >= thr and f is not None and f >= fthr:
+            out.append(k)
+    return out
+
+
 def apply_all(settings: Settings, paths: Iterable[str], emit: Callable[[dict], None] | None = None,
               cancel: threading.Event | None = None) -> dict:
     emit = emit or (lambda e: None)

@@ -332,3 +332,47 @@ def test_parallel_save_cancel_stops_early(settings):
     out = apply_all(settings, paths, emit, cancel)
     assert out["cancelled"] and 3 <= sum(out["counts"].values()) < 30
     assert len(plan(settings, paths)) == 30 - sum(out["counts"].values())
+
+
+def test_match_confidence_scores():
+    from mass_synced_lyrics.providers import LOOKUP_CONFIDENCE, find_synced, match_confidence
+    from mass_synced_lyrics.tags import Meta
+    assert match_confidence(100, 10.0, 10.0) == 100
+    assert match_confidence(100, 10.0, 11.0) == 95 and match_confidence(100, 10.0, 14.0) == 90
+    assert LOOKUP_CONFIDENCE["get"] == 100
+    m = Meta(title="Some Song", artist="Some Artist", album="Some Album")
+    assert find_synced(FakeLrclib([record()]), m, 10.0).confidence == 100          # exact
+    m2 = Meta(title="Some Song", artist="Some Artist", album="Other Album")
+    assert find_synced(FakeLrclib([record()]), m2, 10.0).confidence == 97          # album differs
+    r = find_synced(FakeLrclib([record(title="Some Song (Remix)")]), m, 10.5)     # search, loose name
+    assert r.status == "found" and r.confidence <= 90
+
+
+def test_apply_confident_plan_and_confidences_reach_the_list(settings):
+    from mass_synced_lyrics.applier import plan_confident
+    d = settings.music_folder
+    exact = make_track(os.path.join(d, "a.flac"), "flac")
+    loose = make_track(os.path.join(d, "b.flac"), "flac", title="Other Tune")
+    mine = make_track(os.path.join(d, "c.flac"), "flac", title="Third")
+    side = make_track(os.path.join(d, "Fourth Song.flac"), "flac", title="Fourth Song")
+    write_lrc(os.path.join(d, "Fourth Song.lrc"), LRC)                    # exact sidecar name = 100
+    settings.dry_run = True
+    events = []
+    Engine(settings, events.append, lrclib=FakeLrclib([
+        record(), record(title="Other Tune (Live)"), record(title="Third")])).run()
+    res = {os.path.basename(e["result"].path): e["result"] for e in events if e["type"] == "result"}
+    assert res["a.flac"].conf_online == 100 and res["a.flac"].score == 100
+    assert res["b.flac"].status == "proposed" and res["b.flac"].conf_online < 95
+    assert res["Fourth Song.flac"].conf_local == 100
+    review.choose(mine, LRC, "edited", settings)                         # a per-file choice
+    ok = plan_confident(settings, [exact, loose, mine, side])
+    assert sorted(ok) == sorted([exact, side])
+    assert sorted(plan_confident(settings, [exact, loose, mine, side], threshold=50)) == sorted([exact, loose, side])
+    out = apply_all(settings, ok)
+    assert out["counts"] == {"embedded": 2}
+    assert plan_confident(settings, [exact, loose, mine, side]) == []
+    # a rerun finds them cached and still knows the confidence
+    events = []
+    Engine(settings, events.append, lrclib=FakeLrclib([])).run()
+    cached = {os.path.basename(e["result"].path): e["result"] for e in events if e["type"] == "result"}
+    assert cached["a.flac"].status == "cached" and cached["a.flac"].conf_online == 100

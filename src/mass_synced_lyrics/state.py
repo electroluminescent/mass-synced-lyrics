@@ -18,6 +18,10 @@ KEEP = "keep"      # never change this file's lyrics
 PIN = "pin"        # this file must carry exactly the pinned text ("" = no lyrics)
 
 
+def _f(v) -> float | None:
+    return None if v is None else float(v)
+
+
 class State:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -60,6 +64,12 @@ class State:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
+        for table in ("pending", "candidates"):         # 0-100 scores; NULL = unknown
+            for col in ("confidence", "fit"):
+                try:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
+                except sqlite3.OperationalError:
+                    pass
         self._pending = 0
 
     # -- files
@@ -134,11 +144,25 @@ class State:
         return row[0] if row else None
 
     # -- dry-run proposals
-    def set_pending(self, path: str, source: str, label: str, text: str, lrc_path: str = "") -> None:
+    def set_pending(self, path: str, source: str, label: str, text: str, lrc_path: str = "",
+                    confidence: float | None = None, fit: float | None = None) -> None:
         path = _k(path)
-        self.db.execute("REPLACE INTO pending (path, source, label, text, updated, lrc_path) VALUES (?,?,?,?,?,?)",
-                        (path, source, label, text, time.time(), lrc_path or ""))
+        self.db.execute("REPLACE INTO pending (path, source, label, text, updated, lrc_path, confidence, fit) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (path, source, label, text, time.time(), lrc_path or "", _f(confidence), _f(fit)))
         self._tick()
+
+    def pending_scores(self) -> dict[str, tuple[float | None, float | None]]:
+        """{path: (match confidence, fit) of its proposal (None = unknown)}."""
+        return {p: (c, f) for p, c, f in self.db.execute("SELECT path, confidence, fit FROM pending")}
+
+    def set_pending_fit(self, path: str, text: str, fit: float | None) -> None:
+        """Update the fit of a proposal (when the audio has been checked), if it's still these lyrics."""
+        from .lrc import same_lyrics
+        row = self.get_pending(path)
+        if row is not None and same_lyrics(row[2], text):
+            self.db.execute("UPDATE pending SET fit=? WHERE path=?", (_f(fit), _k(path)))
+            self._tick()
 
     def get_pending(self, path: str):
         """(source, label, text, lrc_path) or None."""
@@ -195,11 +219,28 @@ class State:
         self.db.execute("DELETE FROM candidates WHERE path=?", (_k(path),))
 
     def set_candidate(self, path: str, kind: str, label: str, text: str, lrc_path: str = "",
-                      length: float = 0.0) -> None:
-        self.db.execute("REPLACE INTO candidates (path, kind, label, text, lrc_path, updated, length) "
-                        "VALUES (?,?,?,?,?,?,?)",
-                        (_k(path), kind, label, text, lrc_path or "", time.time(), float(length or 0)))
+                      length: float = 0.0, confidence: float | None = None, fit: float | None = None) -> None:
+        self.db.execute("REPLACE INTO candidates (path, kind, label, text, lrc_path, updated, length, confidence, "
+                        "fit) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (_k(path), kind, label, text, lrc_path or "", time.time(), float(length or 0),
+                         _f(confidence), _f(fit)))
         self._tick()
+
+    def set_candidate_fit(self, path: str, kind: str, fit: float | None) -> None:
+        self.db.execute("UPDATE candidates SET fit=? WHERE path=? AND kind=?", (_f(fit), _k(path), kind))
+        self._tick()
+
+    def all_candidate_scores(self) -> dict[str, dict[str, tuple[float | None, float | None]]]:
+        """{path: {kind: (match confidence, fit)}}."""
+        out: dict[str, dict[str, tuple]] = {}
+        for p, k, c, f in self.db.execute("SELECT path, kind, confidence, fit FROM candidates"):
+            out.setdefault(p, {})[k] = (c, f)
+        return out
+
+    def candidate_scores(self, path: str) -> dict[str, tuple[float | None, float | None]]:
+        """{kind: (match confidence, fit)} for the local / online candidates."""
+        return {k: (c, f) for k, c, f in
+                self.db.execute("SELECT kind, confidence, fit FROM candidates WHERE path=?", (_k(path),))}
 
     def get_candidates(self, path: str) -> dict[str, tuple[str, str, str, float]]:
         """{kind: (label, text, lrc_path, source length in s or 0)} for kind in local / online."""

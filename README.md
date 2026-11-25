@@ -41,7 +41,7 @@ Other behaviour:
 
 ## Review & player tab
 
-After **Find lyrics** finishes, the app switches here. Drag the handle between the song list and the player to resize them.
+As soon as **Find lyrics** finds the first song with new lyrics, the app switches here. Drag the handle between the song list and the player to resize them.
 
 **Song list:** songs are grouped **Artist ▸ Album ▸ song**, using the tags or the folder names when tags are missing.
 
@@ -49,6 +49,22 @@ After **Find lyrics** finishes, the app switches here. Drag the handle between t
 - **Local:** sidecar `.lrc`, collection, or embedded lyrics (in `.lrc` mode).
 - **Online:** found, plain lyrics only, instrumental, or not found.
 - **Choice:** what Apply will do. Click a Choice cell to cycle **Local → Online → Don't change**. On an artist or album row, the click sets every song in that group.
+- **Match:** how sure it is that the lyrics in Choice belong to this song. **yours** means you chose or edited the lyrics.
+  - 100 %: exact title, artist, album and length on LRCLIB, an exact sidecar file name, or embedded lyrics.
+  - 97 %: LRCLIB matched without the album. 92 %: matched by the primary artist. 88 %: matched by a simplified title.
+  - Up to 90 %: found by LRCLIB search. Sidecar and collection files score by how closely the names match.
+  - The score drops by up to 10 points as the recording's length drifts from the song's (2 s at most), and by 5 for songs identified by AcoustID.
+- **Fit:** how well those lyrics fit this recording. It starts at 100 % and loses points for:
+  - lyrics timed for a longer or shorter version;
+  - lines after the end of the song;
+  - lyrics that end before 45 % of the song, or start after half of it;
+  - with the audio checked: lines that start on silence, and lyrics that run into the silence at the end.
+
+  Songs opened in the player are always checked against the audio. **Check lyrics against the audio (slower)** on the Find lyrics tab does it for every song while finding. The New pane shows each candidate's fit and what lowered it.
+
+Click the **Match** or **Fit** header for a slider that hides songs below a chosen %. Songs without a score stay listed. The box at the top left arranges the list by **Artist ▸ Album** (from the tags) or by **Folders** on disk. Right-click a song for **Open file location**, or a group row for **Open folder**.
+
+**Filters** (above the list): **Lyrics found** shows only songs with lyrics to write. It is on by default; the **List only songs with lyrics found** switch on the Find lyrics tab sets the default for each run. **Hide saved** hides songs already written or up to date. **Hide low confidence** hides songs below the **High confidence** (95 %) or **Good fit** (80 %) level set on the Find lyrics tab.
 
 **Several songs at once:** Ctrl+click and Shift+click select several songs, and an artist or album row counts as all its songs. Clicking a Choice cell on a selected row changes them all. **Right-click** for:
 
@@ -90,6 +106,8 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 - **Clear pins** and **Clear edited times** remove them; *Reset timing* clears everything.
 
 Pins, edits and checkpoints are saved per song.
+
+**Apply confident** (bottom bar, beside Apply) writes the found lyrics at or above both the **High confidence** and **Good fit** levels straight away, without asking. Songs with your own choices or edits are left for **Apply**.
 
 **Per-file choices** are recorded here and written by the bottom bar's **Apply**. They take precedence over the saved settings and the current run's options, and later runs keep them.
 

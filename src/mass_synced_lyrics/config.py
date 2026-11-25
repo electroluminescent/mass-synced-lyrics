@@ -33,6 +33,15 @@ class Settings:
     retry_misses: bool = False
     requests_per_minute: int = 80
     workers: int = 6                     # songs processed at the same time while finding lyrics
+    confident_threshold: int = 95        # "Apply confident" writes proposals at or above this (0-100)
+    only_found: bool = True              # song list: show only songs with lyrics found
+    hide_saved: bool = False             # song list: hide songs already saved / up to date
+    confident_fit: int = 80              # ... and whose lyrics fit the recording at least this well (0-100)
+    fit_audio: bool = False              # also decode the audio while finding to check the fit (slower)
+    hide_low_confidence: bool = False    # song list: hide songs below either level
+    list_min_match: int = 0              # song list: Match column filter (hide known scores below this)
+    list_min_fit: int = 0                # song list: Fit column filter
+    list_view: str = "artist"            # song list: "artist" (Artist ▸ Album) or "folder" (folders on disk)
     checkpoint_seconds: float = 1.0      # review player: play ± this around a checkpoint
     loop_checkpoints: bool = False
     playback_volume: int = 80            # review player volume, 0–100

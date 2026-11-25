@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+from . import fit as fitmod
 from . import lrc as lrcmod
 from . import user_agent
 from .collection import LrcCollection
@@ -21,13 +22,13 @@ from .paths import display_path, to_long_path  # noqa: F401  (re-exported)
 from .output import LRC, VerifyError, current_texts, dispose, same_file, write_output
 from .output import lrc_path_for, read_lrc_file
 from .providers import (AcoustIdClient, Cancelled, HttpClient, LrclibClient, LyricsResult,
-                        MusicBrainzClient, ServiceError, find_fpcalc, find_synced)
+                        MusicBrainzClient, ServiceError, find_fpcalc, find_synced, match_confidence)
 from .sidecar import AudioEntry, SidecarMatch, match_folder
 from .state import FINAL, KEEP, MISSES, State
 from .tags import AUDIO_EXTENSIONS, Meta, TagFile, UnsupportedFile
 
 CSV_FIELDS = ["time", "status", "source", "path", "duration", "artist", "title", "album",
-              "lrc_file", "score", "detail"]
+              "lrc_file", "score", "fit", "detail"]
 
 STATUS_LABELS = {
     "embedded": "Embedded",
@@ -70,6 +71,11 @@ class Result:
     local: str = ""      # local candidate kind: sidecar | collection | embedded
     online: str = ""     # LRCLIB outcome: found | instrumental | plain only | not found | ""
     choice: str = ""     # what Apply will do: local | online | keep | custom
+    conf_local: float | None = None    # 0-100 match confidence of the local candidate
+    conf_online: float | None = None   # ... and of the LRCLIB one
+    fit_local: float | None = None     # 0-100: how well the local lyrics fit this recording (fit.py)
+    fit_online: float | None = None
+    fit: float | None = None           # fit of the lyrics this result writes / proposes
 
 
 ONLINE_LABELS = {"found": "found", "instrumental": "instrumental", "no_synced": "plain only",
@@ -310,11 +316,14 @@ class Engine:
             recheck_collection = prev[2] in MISSES and self.collection is not None and len(self.collection)
             if not (s.retry_misses and prev[2] in MISSES) and not recheck_collection:
                 info = state.get_file_info(path)
+                sc = state.candidate_scores(path)
+                lo, on = sc.get("local", (None, None)), sc.get("online", (None, None))
                 return Result(path, "cached", info.get("source", ""),
                               Meta(title=info.get("title", ""), artist=info.get("artist", ""),
                                    album=info.get("album", "")),
                               detail=prev[2], local=info.get("local", ""), online=info.get("online", ""),
-                              choice=state.current_choice(path))
+                              choice=state.current_choice(path), conf_local=lo[0], conf_online=on[0],
+                              fit_local=lo[1], fit_online=on[1])
             online_allowed = s.retry_misses or prev[2] not in MISSES
         else:
             online_allowed = True
@@ -337,11 +346,11 @@ class Engine:
                      match.lrc.path)
             if any(lrcmod.same_lyrics(t, local[1]) for t in existing):
                 res = Result(path, "already_embedded", mode, meta, dur, local[2], local[3],
-                             local="sidecar", choice="local")
+                             local="sidecar", choice="local", conf_local=local[3])
                 if find and self._will_dispose(match.lrc.path, path):
                     # remember the sidecar so the final apply step can tidy it up
                     state.set_pending(path, "local .lrc", f"sidecar {res.lrc_file}", local[1],
-                                      match.lrc.path)
+                                      match.lrc.path, local[3])
                 self._dispose_lrc(match.lrc.path, res)
                 return res
         elif has_synced:
@@ -350,7 +359,7 @@ class Engine:
             # .lrc output: lyrics already embedded in the file can simply be exported.
             emb = next((t for t in meta.lyrics if lrcmod.is_synced(t)), None)
             if emb:
-                local = ("embedded", s.tidy(emb), "", None, "")
+                local = ("embedded", s.tidy(emb), "", 100.0, "")
         if local is None and note.startswith("ambiguous"):
             return Result(path, "ambiguous", meta=meta, duration=dur, detail=note, choice="keep")
 
@@ -367,7 +376,7 @@ class Engine:
             hit, why = self.collection.find(ident.title, ident.artist, dur, s.match_threshold)
             if hit:
                 local = ("collection", s.tidy(hit.entry.lrc.text), display_path(hit.entry.lrc.path),
-                         round(hit.score, 1), "")
+                         self._ident_conf(hit.score, how), "")
             elif why:
                 note = (note + "; " if note else "") + why
                 if why.startswith("ambiguous"):
@@ -380,21 +389,33 @@ class Engine:
             found = self._lookup(ident, dur, state)
             if found.status == "found":
                 found.synced = s.tidy(found.synced)
+                found.confidence = self._ident_conf(found.confidence, how)
         online = ONLINE_LABELS.get(found.status, "") if found else ""
         detail = "; ".join(x for x in (note, how, found.how if found else "") if x)
+        has_online = found is not None and found.status == "found"
+        fit_local = fit_online = None
+        if local is not None or has_online:
+            peaks = fitmod.peaks_for(display_path(path)) if s.fit_audio else None
+            if local is not None:
+                fit_local = fitmod.fit_score(local[1], dur, lrcmod.analyze(local[1]).length_header, peaks)[0]
+            if has_online:
+                fit_online = fitmod.fit_score(found.synced, dur, found.duration, peaks)[0]
         shown = ident or meta
 
         if find:
             if local is not None:
                 state.set_candidate(path, "local", self._label(local[0], local[2]), local[1], local[4],
-                                    lrcmod.analyze(local[1]).length_header or 0)
+                                    lrcmod.analyze(local[1]).length_header or 0, local[3], fit_local)
             if found is not None and found.status == "found":
                 state.set_candidate(path, "online", f"lrclib #{found.record_id}", found.synced, "",
-                                    found.duration)
+                                    found.duration, found.confidence, fit_online)
 
         if local is not None:
             res = Result(path, "embedded", local[0], shown, dur, local[2], local[3], detail,
-                         local=LOCAL_SOURCES.get(local[0], local[0]), online=online, choice="local")
+                         local=LOCAL_SOURCES.get(local[0], local[0]), online=online, choice="local",
+                         conf_local=local[3],
+                         conf_online=found.confidence if has_online else None,
+                         fit_local=fit_local, fit_online=fit_online, fit=fit_local)
             if local[0] == "embedded":
                 res.detail = "; ".join(x for x in (detail, "exported from embedded lyrics") if x)
             elif has_synced:
@@ -404,8 +425,9 @@ class Engine:
             self._deliver(tf, local[1], st, state, res, local[4])
             return res
         if found is not None and found.status == "found":
-            res = Result(path, "embedded", "lrclib", shown, dur, f"lrclib #{found.record_id}", None, detail,
-                         online=online, choice="online")
+            res = Result(path, "embedded", "lrclib", shown, dur, f"lrclib #{found.record_id}",
+                         found.confidence, detail, online=online, choice="online", conf_online=found.confidence,
+                         fit_online=fit_online, fit=fit_online)
             if existing:
                 res.detail = "; ".join(x for x in (detail, "replaces plain lyrics") if x)
             self._deliver(tf, found.synced, st, state, res)
@@ -416,6 +438,11 @@ class Engine:
             return Result(path, status, meta=shown, duration=dur,
                           detail=(note + "; " if note else "") + why, choice="keep")
         return Result(path, found.status, "lrclib", shown, dur, detail=detail, online=online, choice="keep")
+
+    @staticmethod
+    def _ident_conf(conf: float, how: str) -> float:
+        """Songs identified by fingerprint (no tags) are a little less certain."""
+        return round(max(0.0, conf - 5.0), 1) if "AcoustID" in (how or "") else round(conf, 1)
 
     @staticmethod
     def _label(source: str, lrc_file: str) -> str:
@@ -460,10 +487,14 @@ class Engine:
         cached = state.get_lookup(key)
         if cached and (cached[0] == "found" or not self.s.retry_misses):
             p = cached[1]
+            conf = p.get("confidence")
+            if conf is None:                  # looked up by an older version: judge by the length only
+                conf = match_confidence(95.0, duration, p.get("duration"))
             return LyricsResult(cached[0], p.get("synced", ""), p.get("id"), "cached lookup",
-                                float(p.get("duration") or 0))
+                                float(p.get("duration") or 0), float(conf))
         res = find_synced(self.lrclib, meta, duration)
-        state.set_lookup(key, res.status, {"synced": res.synced, "id": res.record_id, "duration": res.duration})
+        state.set_lookup(key, res.status, {"synced": res.synced, "id": res.record_id, "duration": res.duration,
+                                           "confidence": res.confidence})
         return res
 
     # --------------------------------------------------------------- writes
@@ -473,7 +504,7 @@ class Engine:
         path = tf.path
         label = res.lrc_file if res.source == "lrclib" else self._label(res.source, res.lrc_file)
         if self.s.dry_run:
-            state.set_pending(path, res.source, label, text, lrc_src)
+            state.set_pending(path, res.source, label, text, lrc_src, res.score, res.fit)
             res.status = "proposed"
             return
         mode = self.s.output_mode
@@ -548,5 +579,6 @@ class Engine:
             "status": r.status, "source": r.source, "path": display_path(r.path),
             "duration": f"{r.duration:.1f}" if r.duration else "",
             "artist": m.artist, "title": m.title, "album": m.album,
-            "lrc_file": r.lrc_file, "score": "" if r.score is None else r.score, "detail": r.detail,
+            "lrc_file": r.lrc_file, "score": "" if r.score is None else r.score,
+            "fit": "" if r.fit is None else r.fit, "detail": r.detail,
         }

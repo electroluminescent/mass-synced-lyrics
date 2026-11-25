@@ -123,6 +123,20 @@ class LyricsResult:
     record_id: int | None = None
     how: str = ""
     duration: float = 0.0      # length of the recording the lyrics were timed for
+    confidence: float = 0.0    # 0-100: how sure the match is (see match_confidence)
+
+
+# How sure each kind of LRCLIB match is before the length check (search results use the name scores).
+LOOKUP_CONFIDENCE = {"get": 100.0, "get (no album)": 97.0, "get (primary artist)": 92.0,
+                     "get (simplified title)": 88.0}
+
+
+def match_confidence(base: float, file_duration: float | None, lyrics_duration: float | None) -> float:
+    """Lower the confidence as the recording's length drifts from the song's (up to -10 at 2 s)."""
+    conf = base
+    if file_duration and lyrics_duration:
+        conf -= min(10.0, 5.0 * abs(float(lyrics_duration) - float(file_duration)))
+    return round(max(0.0, min(100.0, conf)), 1)
 
 
 class LrclibClient:
@@ -155,7 +169,7 @@ def find_synced(client: LrclibClient, meta: Meta, duration: float | None,
     loose_title = _loose_title(title)
     seen_instrumental = seen_plain = False
 
-    def judge(rec: dict | None, how: str) -> LyricsResult | None:
+    def judge(rec: dict | None, how: str, base: float | None = None) -> LyricsResult | None:
         nonlocal seen_instrumental, seen_plain
         if not rec:
             return None
@@ -166,8 +180,10 @@ def find_synced(client: LrclibClient, meta: Meta, duration: float | None,
         if synced and lrcmod.is_synced(synced):
             reason = lrcmod.check_against_duration(lrcmod.analyze(synced), duration)
             if reason is None:
-                return LyricsResult("found", lrcmod.clean_text(synced), rec.get("id"), how,
-                                    float(rec.get("duration") or 0))
+                rd = float(rec.get("duration") or 0)
+                conf = match_confidence(LOOKUP_CONFIDENCE.get(how, 85.0) if base is None else base,
+                                        duration, rd)
+                return LyricsResult("found", lrcmod.clean_text(synced), rec.get("id"), how, rd, conf)
         elif rec.get("plainLyrics"):
             seen_plain = True
         return None
@@ -214,7 +230,8 @@ def find_synced(client: LrclibClient, meta: Meta, duration: float | None,
             if best is None or score > best[0]:
                 best = (score, rec)
         if best:
-            res = judge(best[1], "search")
+            # found only by searching: at most 90, lower the further the names are off
+            res = judge(best[1], "search", min(90.0, best[0] / 2))
             if res:
                 return res
     if seen_instrumental:

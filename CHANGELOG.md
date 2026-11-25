@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.5
+- **Apply confident** button beside Apply writes, without asking, the found lyrics at or above both the
+  **High confidence** (95 % by default) and **Good fit** (80 %) levels on the Find lyrics tab. Songs with
+  your own choices or edits are left for Apply.
+- Two scores per song, as new list columns:
+  - **Match**: how sure it is that the lyrics belong to this song. It's based on how exactly LRCLIB matched
+    (title, artist, album) or how closely a sidecar/collection name matched, and the length difference.
+    Songs identified by AcoustID lose 5 points, and LRCLIB search matches top out at 90 %.
+  - **Fit**: how well the lyrics fit this recording. It checks the length the lyrics were timed for, lines
+    past the end, and how the lines spread over the song. When the audio is checked, it also looks for lines
+    that start on silence and lyrics that run into the silence at the end.
+  - Songs opened in the player are always checked against their audio. The new **Check lyrics against the
+    audio (slower)** switch does it for every song while finding.
+  - The New pane shows each candidate's fit and what lowered it.
+- Click the **Match** or **Fit** column header for a slider that hides songs below a chosen %.
+- More song list filters: **Lyrics found** (only songs with lyrics to write), **Hide saved**, and **Hide
+  low confidence** (below either level). The Find lyrics tab's **List only songs with lyrics found** switch,
+  on by default, sets Lyrics found for each run.
+- The list can be arranged by **Artist ▸ Album** or by **Folders** on disk, both as a tree.
+- Right-click a song for **Open file location**, or a group for **Open folder**. Either opens it in
+  File Explorer.
+- Speed: the app no longer slows down as the list grows. Adding a song used to get slower with every song
+  listed (about 35 ms each at 40,000 songs, and worse in the folder view). It now stays about 0.2 ms.
+  - Group totals are updated once per batch, from their direct children.
+  - The shown-songs count is tracked as songs are added and removed.
+  - The activity log is written in batches.
+  - The Apply counts are read in one database pass, off the UI thread during a run.
+  - The session autosave runs in the background, and the search box waits for a pause in typing.
+- Fixed: the activity log listed only some songs during a run (1.1.4).
+
 ## 1.1.4
 - Songs are looked up in parallel (6 workers by default, `--workers N`). The LRCLIB rate limit and
   its back-off are shared by all workers; AcoustID lookups stay one at a time.

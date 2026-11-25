@@ -10,11 +10,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import APP_TITLE, theme
+from . import fit as fitmod
 from . import lrc as lrcmod
 from . import review
 from .config import save_settings
 from .engine import STATUS_LABELS, display_path
-from .paths import state_key
+from .paths import open_folder, reveal_in_explorer, state_key
 from .player import Player, decode, envelope, volume_gain
 from .state import KEEP, State
 
@@ -62,14 +63,28 @@ LEGEND_HINTS = {
     "c_problem": "Needs a look: error, ambiguous .lrc match, or unsupported file.",
 }
 COLUMN_HINTS = {
-    "#0": "Artist ▸ Album ▸ song. Ctrl/Shift+click selects several songs; an artist or album row counts as all "
-          "its songs. Right-click for Save now, sources, Reset and Restore original.",
+    "#0": "Songs by Artist ▸ Album or by folder (switch with the box above). Ctrl/Shift+click selects several "
+          "songs; a group row counts as all its songs. Right-click for Save now, sources, Reset, Restore original "
+          "and opening the file's location.",
     "#1": "What happened to the song so far.",
     "#2": "Lyrics found locally: a sidecar .lrc beside the song, your collection, or embedded lyrics.",
     "#3": "Result of the LRCLIB lookup: found, plain lyrics only, instrumental, or not found.",
     "#4": "What Apply will do. Click a Choice cell to cycle Local → Online → Don't change. On an artist/album "
           "row or a multi-selection it changes all of them.",
+    "#5": "How sure it is that the lyrics in Choice belong to this song (100% = exact title, artist, album "
+          "and length). Click the header to filter by it.",
+    "#6": "How well the lyrics in Choice fit this recording: its length, lines past the end, how the lines "
+          "spread over the song and, once the audio has been checked, lines that start on silence. "
+          "Click the header to filter by it.",
 }
+
+VIEWS = {"artist": "Artist ▸ Album", "folder": "Folders"}
+VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ Song"}
+
+ROW_KEYS = ("status", "source", "artist", "title", "local", "online", "choice", "album", "conf_local",
+            "conf_online", "fit_local", "fit_online")
+SCORE_COLS = {"match": ("Match", "list_min_match"), "fit": ("Fit", "list_min_fit")}
+FOUND_STATUSES = {"proposed", "chosen", "locked"}
 
 
 RULER_H = 16
@@ -159,6 +174,10 @@ class Tooltip:
             self.tip = self.label = None
 
 
+def _blank_row() -> dict:
+    return {k: (None if k.startswith(("conf_", "fit_")) else "") for k in ROW_KEYS}
+
+
 class ReviewTab(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master, padding=6, takefocus=0)
@@ -221,6 +240,13 @@ class ReviewTab(ttk.Frame):
         paned.add(left, minsize=300, stretch="always")
         top = ttk.Frame(left)
         top.pack(fill="x")
+        self.v_view = tk.StringVar(value=VIEWS.get(getattr(self.app.settings, "list_view", "artist"),
+                                                   VIEWS["artist"]))
+        vcmb = theme.hint(ttk.Combobox(top, textvariable=self.v_view, values=list(VIEWS.values()), state="readonly",
+                                       width=14),
+                          "Arrange the list by Artist ▸ Album (from the tags) or by the folders on disk.")
+        vcmb.pack(side="left", padx=(0, 6))
+        vcmb.bind("<<ComboboxSelected>>", lambda e: self._view_changed())
         self.v_filter = tk.StringVar(value="All")
         cmb = theme.hint(ttk.Combobox(top, textvariable=self.v_filter, values=list(FILTERS), state="readonly", width=16), 'Show only some songs: needing a look, found, changed, your choices…')
         cmb.pack(side="left")
@@ -228,23 +254,55 @@ class ReviewTab(ttk.Frame):
         self.v_search = tk.StringVar()
         ent = theme.hint(ttk.Entry(top, textvariable=self.v_search), 'Search by artist, album, title or path.')
         ent.pack(side="left", fill="x", expand=True, padx=(6, 0))
-        self.v_search.trace_add("write", lambda *a: self._refill())
+        self.v_search.trace_add("write", lambda *a: self._search_changed())
         legend = ttk.Frame(left)
         legend.pack(fill="x", pady=(4, 0))
         for tag, text in (("c_local", "Local"), ("c_online", "Online"), ("c_custom", "Custom"),
                           ("c_keep", "Don't change"), ("c_done", "Saved"), ("c_problem", "Check")):
             pill = theme.register(tk.Label(legend, text=text), "pill", tag=tag)
             theme.hint(pill, LEGEND_HINTS[tag]).pack(side="left", padx=(0, 4))
+        flt = ttk.Frame(left)
+        flt.pack(fill="x", pady=(4, 0))
+        st0 = self.app.settings
+        self.v_only_found = tk.BooleanVar(value=bool(getattr(st0, "only_found", True)))
+        self.v_hide_saved = tk.BooleanVar(value=bool(getattr(st0, "hide_saved", False)))
+        self.v_hide_low = tk.BooleanVar(value=bool(getattr(st0, "hide_low_confidence", False)))
+        for text, var, key, tip in (
+                ("Lyrics found", self.v_only_found, "",
+                 "Show only songs with lyrics found that can be written (local or online). The default for "
+                 "each run is set on the Find lyrics tab."),
+                ("Hide saved", self.v_hide_saved, "hide_saved",
+                 "Hide songs whose lyrics are already saved or already up to date."),
+                ("Hide low confidence", self.v_hide_low, "hide_low_confidence",
+                 "Hide songs whose found lyrics are below the High confidence or Good fit level set on the "
+                 "Find lyrics tab.")):
+            theme.hint(ttk.Checkbutton(flt, text=text, variable=var,
+                                       command=lambda k=key, v=var: self._filter_toggled(k, v)), tip).pack(
+                side="left", padx=(0, 10))
         tf = ttk.Frame(left)
         tf.pack(fill="both", expand=True, pady=4)
-        cols = ("status", "local", "online", "choice")
+        cols = ("status", "local", "online", "choice", "match", "fit")
+        self.min_score = {k: int(getattr(st0, attr, 0) or 0) for k, (_, attr) in SCORE_COLS.items()}
+        self._score_popup = None
         self.tree = ttk.Treeview(tf, columns=cols, show="tree headings", selectmode="extended")
-        self.tree.heading("#0", text="Artist ▸ Album ▸ Song")
-        self.tree.column("#0", width=190, minwidth=110, stretch=True)
-        for col, w, label in (("status", 76, "Status"), ("local", 64, "Local"),
-                              ("online", 70, "Online"), ("choice", 108, "Choice ⟳")):
+        self.tree.heading("#0", text=VIEW_HEADINGS[self._view()])
+        self.group_dirs: dict[str, str] = {}      # group row → its folder on disk
+        # Group-row totals are kept per group and refreshed once per batch of changes (bottom-up), and the
+        # "shown" count is tracked incrementally, so adding a song costs the same with 50 or 50,000 listed.
+        self._group_stats: dict[str, tuple] = {}
+        self._dirty_groups: set[str] = set()
+        self._flush_pending = False
+        self._shown: set[str] = set()
+        self._search_job = None
+        self.tree.column("#0", width=180, minwidth=140, stretch=True)
+        for col, w, label in (("status", 70, "Status"), ("local", 58, "Local"),
+                              ("online", 66, "Online"), ("choice", 96, "Choice ⟳"), ("match", 56, "Match"),
+                              ("fit", 48, "Fit")):
             self.tree.heading(col, text=label)
             self.tree.column(col, width=w, minwidth=40, stretch=False)
+        for col in SCORE_COLS:
+            self.tree.heading(col, command=lambda c=col: self._score_filter_popup(c))
+            self._score_heading(col)
         theme.register(self, "callback", fn=self._restyle)
         self.tree.bind("<Button-1>", self._tree_click, add="+")
         self.tree.bind("<Button-3>", self._tree_menu)
@@ -254,7 +312,9 @@ class ReviewTab(ttk.Frame):
         if sys.platform == "darwin":
             self.tree.bind("<Button-2>", self._tree_menu)
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
+        hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=sb.set, xscrollcommand=hsb.set)
+        hsb.pack(side="bottom", fill="x")          # for narrow lists: the columns stay readable
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
@@ -368,7 +428,11 @@ class ReviewTab(ttk.Frame):
         self._lyrics_paned = lp
         lp.bind("<Map>", lambda e: self.after(30, self._even_lyrics_split), add="+")
         self.cmb_cand = theme.hint(ttk.Combobox(nf, state="readonly"), 'Lyrics to compare and choose from: what Find found, sidecars, collection, LRCLIB, the current lyrics (to re-time), the originals, or none.')
-        self.cmb_cand.pack(fill="x", pady=(0, 4))
+        self.cmb_cand.pack(fill="x", pady=(0, 2))
+        self.v_fit = tk.StringVar()
+        theme.hint(ttk.Label(nf, textvariable=self.v_fit, style="Caption.TLabel", wraplength=420, justify="left"),
+                   "How well these lyrics fit this recording (length, lines past the end, spread over the song, "
+                   "lines starting on silence).").pack(fill="x", pady=(0, 4))
         self.cmb_cand.bind("<<ComboboxSelected>>", lambda e: (self._select_candidate(self.cmb_cand.current()),
                                                               self._grab_keys()))
         self.btn_keep = theme.flat_button(lf, "Keep current", self._lock, pady=8)
@@ -408,7 +472,9 @@ class ReviewTab(ttk.Frame):
         if getattr(self, "_sash_done", False):
             return
         self._sash_done = True
-        x = int(getattr(self.app.settings, "review_split", 0) or 540)
+        # default: ~40% of the window for the list (between 520 and 680 px), leaving the player its toolbar
+        x = int(getattr(self.app.settings, "review_split", 0) or
+                max(520, min(680, int(0.40 * max(self._paned.winfo_width(), self.winfo_toplevel().winfo_width())))))
         self.after(50, lambda: self._paned.sash_place(0, x, 1))
         self._paned.bind("<ButtonRelease-1>", self._save_split, add="+")
 
@@ -484,13 +550,16 @@ class ReviewTab(ttk.Frame):
     # ============================================================ results
     def add_row(self, path: str, status: str | None = None, source: str | None = None, artist: str | None = None,
                 title: str | None = None, local: str | None = None, online: str | None = None,
-                choice: str | None = None, album: str | None = None) -> None:
+                choice: str | None = None, album: str | None = None, conf_local: float | None = None,
+                conf_online: float | None = None, fit_local: float | None = None,
+                fit_online: float | None = None) -> None:
         """Add or update a song row; None keeps the current value."""
         path = state_key(path)
-        row = self.rows.get(path) or {"status": "", "source": "", "artist": "", "title": "", "local": "",
-                                      "online": "", "choice": "", "album": ""}
+        row = self.rows.get(path) or _blank_row()
         for k, v in (("status", status), ("source", source), ("artist", artist), ("title", title),
-                     ("local", local), ("online", online), ("choice", choice), ("album", album)):
+                     ("local", local), ("online", online), ("choice", choice), ("album", album),
+                     ("conf_local", conf_local), ("conf_online", conf_online),
+                     ("fit_local", fit_local), ("fit_online", fit_online)):
             if v is not None:
                 row[k] = v
         self.rows[path] = row
@@ -500,11 +569,25 @@ class ReviewTab(ttk.Frame):
             self.app.show_apply_bar()
         if self._matches(path):
             self._upsert(path)
-        elif self.tree.exists(path):
+        elif path in self._shown:
             parent = self.tree.parent(path)
             self.tree.delete(path)
-            self._refresh_groups(parent)
+            self._shown.discard(path)
+            self._mark_dirty(parent)
         self._update_count()
+
+    def _search_changed(self) -> None:
+        """Typing in the search box: refill once the typing pauses."""
+        if self._search_job is not None:
+            try:
+                self.after_cancel(self._search_job)
+            except tk.TclError:
+                pass
+        self._search_job = self.after(250, self._search_now)
+
+    def _search_now(self) -> None:
+        self._search_job = None
+        self._refill()
 
     # -- grouping
     def _group_keys(self, path: str) -> tuple[str, str]:
@@ -514,16 +597,84 @@ class ReviewTab(ttk.Frame):
         album = r.get("album") or os.path.basename(folder) or "(no album)"
         return artist, album
 
+    def _view(self) -> str:
+        return next((k for k, v in VIEWS.items() if v == self.v_view.get()), "artist")
+
+    def _view_changed(self) -> None:
+        view = self._view()
+        self.tree.heading("#0", text=VIEW_HEADINGS[view])
+        self.app.settings.list_view = view
+        try:
+            save_settings(self.app.settings)
+        except OSError:
+            pass
+        self._group_target.clear()
+        self._refill()
+
+    def _folder_chain(self, path: str) -> list[tuple[str, str]]:
+        """[(label, folder)] from the top folder shown down to the song's own folder."""
+        folder = os.path.normpath(os.path.dirname(display_path(path)))
+        root = os.path.normpath(self.app.settings.music_folder) if self.app.settings.music_folder else ""
+        if root and os.path.normcase(folder + os.sep).startswith(os.path.normcase(root.rstrip("\\/") + os.sep)):
+            chain = [(os.path.basename(root.rstrip("\\/")) or root, root)]
+            cur = root
+            rel = os.path.relpath(folder, root)
+            for part in ([] if rel == "." else rel.split(os.sep)):
+                cur = os.path.join(cur, part)
+                chain.append((part, cur))
+            return chain
+        drive, rest = os.path.splitdrive(folder)
+        anchor = drive + os.sep if drive or folder.startswith(os.sep) else ""
+        chain = [(anchor or ".", anchor or ".")] if anchor else []
+        cur = anchor
+        for part in [x for x in rest.split(os.sep) if x]:
+            cur = os.path.join(cur, part) if cur else part
+            chain.append((part, cur))
+        return chain or [(folder, folder)]
+
     def _ensure_groups(self, path: str) -> str:
+        many = len(self.rows) > 600
+        if self._view() == "folder":
+            parent = ""
+            for depth, (label, folder) in enumerate(self._folder_chain(path)):
+                iid = "grp:dir:" + os.path.normcase(folder)
+                if not self.tree.exists(iid):
+                    self.tree.insert(parent, "end", iid=iid, text=label, open=not many or depth == 0,
+                                     tags=("group" if depth == 0 else "subgroup",))
+                self.group_dirs[iid] = folder
+                parent = iid
+            return parent
         artist, album = self._group_keys(path)
         a_id = "grp:" + artist.casefold()
         b_id = a_id + "\x1f" + album.casefold()
-        many = len(self.rows) > 600
         if not self.tree.exists(a_id):
             self.tree.insert("", "end", iid=a_id, text=artist, open=not many, tags=("group",))
         if not self.tree.exists(b_id):
             self.tree.insert(a_id, "end", iid=b_id, text=album, open=not many, tags=("subgroup",))
         return b_id
+
+    def group_folder(self, node: str) -> str:
+        """The folder on disk for a group row: its own folder, or the folder its songs share."""
+        if node in self.group_dirs and self._view() == "folder":
+            return self.group_dirs[node]
+        dirs = [os.path.dirname(display_path(p)) for p in self._songs_under(node)]
+        if not dirs:
+            return ""
+        try:
+            return os.path.commonpath(dirs)
+        except ValueError:
+            return dirs[0]
+
+    def open_location(self, node: str) -> None:
+        try:
+            if node.startswith("grp:"):
+                folder = self.group_folder(node)
+                if folder:
+                    open_folder(folder)
+            else:
+                reveal_in_explorer(node)
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"Could not open the location:\n{e}")
 
     def _songs_under(self, node: str) -> list[str]:
         out = []
@@ -535,27 +686,77 @@ class ReviewTab(ttk.Frame):
         return out
 
     def _refresh_groups(self, node: str) -> None:
-        """Update counts on a group row and its parent; drop empty groups."""
-        while node and node.startswith("grp:"):
-            parent = self.tree.parent(node)
-            songs = self._songs_under(node)
-            if not songs:
+        """Update the totals on a group row and the groups above it (now)."""
+        self._mark_dirty(node)
+        self._flush_groups()
+
+    def _mark_dirty(self, node: str) -> None:
+        if node and node.startswith("grp:"):
+            self._dirty_groups.add(node)
+            if not self._flush_pending:
+                self._flush_pending = True
+                self.after_idle(self._flush_groups)
+
+    def _flush_groups(self) -> None:
+        """Recompute the totals of changed groups from their direct children, deepest first; a parent
+        group adds up its child groups' saved totals instead of walking every song again."""
+        self._flush_pending = False
+        if not self._dirty_groups:
+            return
+        dirty, depth = set(), {}
+        for n in self._dirty_groups:
+            chain = []
+            while n and n.startswith("grp:") and n not in dirty and self.tree.exists(n):
+                chain.append(n)
+                n = self.tree.parent(n)
+            dirty.update(chain)
+        self._dirty_groups.clear()
+        for n in dirty:
+            d, x = 0, n
+            while x:
+                x = self.tree.parent(x)
+                d += 1
+            depth[n] = d
+        thr_c, thr_f = self._confident_threshold(), self._fit_threshold()
+        for node in sorted(dirty, key=lambda n: -depth[n]):
+            if not self.tree.exists(node):
+                continue
+            count = n_local = n_online = low = poor = 0
+            choices: set = set()
+            for c in self.tree.get_children(node):
+                if c.startswith("grp:"):
+                    st = self._group_stats.get(c)
+                    if st is None:
+                        continue
+                    count += st[0]; n_local += st[1]; n_online += st[2]; low += st[4]; poor += st[5]
+                    choices |= st[3]
+                    continue
+                r = self.rows.get(c)
+                if r is None:
+                    continue
+                count += 1
+                n_local += 1 if r["local"] else 0
+                n_online += 1 if r["online"] == "found" else 0
+                choices.add(r["choice"])
+                cv, fv = self.row_confidence(r), self.row_fit(r)
+                low += 1 if cv is not None and cv < thr_c else 0
+                poor += 1 if fv is not None and fv < thr_f else 0
+            if not count:
                 self.tree.delete(node)
-            else:
-                rows = [self.rows[p] for p in songs if p in self.rows]
-                n_local = sum(1 for r in rows if r["local"])
-                n_online = sum(1 for r in rows if r["online"] == "found")
-                choices = {r["choice"] for r in rows}
-                choice = CHOICE_TEXT.get(next(iter(choices)), "") if len(choices) == 1 else "mixed"
-                self.tree.item(node, values=(f"{len(rows)} song{'s' if len(rows) != 1 else ''}",
-                                             f"{n_local} local" if n_local else "—",
-                                             f"{n_online} found" if n_online else "—",
-                                             f"⟳ {choice}" if choice else ""))
-            node = parent
+                self._group_stats.pop(node, None)
+                self.group_dirs.pop(node, None)
+                continue
+            self._group_stats[node] = (count, n_local, n_online, frozenset(choices), low, poor)
+            choice = CHOICE_TEXT.get(next(iter(choices)), "") if len(choices) == 1 else "mixed"
+            self.tree.item(node, values=(f"{count} song{'s' if count != 1 else ''}",
+                                         f"{n_local} local" if n_local else "—",
+                                         f"{n_online} found" if n_online else "—",
+                                         f"⟳ {choice}" if choice else "",
+                                         f"{low} low" if low else "",
+                                         f"{poor} poor" if poor else ""))
 
     def _update_count(self) -> None:
-        shown = sum(1 for p in self.rows if self.tree.exists(p))
-        self.v_count.set(f"{shown} shown / {len(self.rows)} songs")
+        self.v_count.set(f"{len(self._shown)} shown / {len(self.rows)} songs")
 
     def _row_tag(self, row: dict) -> str:
         if row["status"] in PROBLEM_STATUSES:
@@ -569,7 +770,165 @@ class ReviewTab(ttk.Frame):
         r = self.rows[path]
         status = SHORT_STATUS.get(r["status"], STATUS_LABELS.get(r["status"], r["status"]))
         choice = CHOICE_TEXT.get(r["choice"], r["choice"])
-        return (status, r["local"] or "—", r["online"] or "—", f"⟳ {choice}" if choice else "")
+        conf, fit = self.row_confidence(r), self.row_fit(r)
+        if r.get("choice") in ("custom", "remove"):
+            match = fitv = "yours"
+        else:
+            match = "—" if conf is None else f"{conf:.0f}%"
+            fitv = "—" if fit is None else f"{fit:.0f}%"
+        return (status, r["local"] or "—", r["online"] or "—", f"⟳ {choice}" if choice else "", match, fitv)
+
+    @staticmethod
+    def _by_choice(r: dict, prefix: str) -> float | None:
+        choice = r.get("choice")
+        if choice == "local":
+            return r.get(prefix + "local")
+        if choice == "online":
+            return r.get(prefix + "online")
+        if choice in ("keep", "custom", "remove"):
+            return None
+        vals = [c for c in (r.get(prefix + "local"), r.get(prefix + "online")) if c is not None]
+        return max(vals) if vals else None
+
+    @classmethod
+    def row_confidence(cls, r: dict) -> float | None:
+        """Match confidence of the lyrics the song's Choice would write (None = nothing found / not known)."""
+        return cls._by_choice(r, "conf_")
+
+    @classmethod
+    def row_fit(cls, r: dict) -> float | None:
+        """How well the lyrics the song's Choice would write fit the recording (None = not known)."""
+        return cls._by_choice(r, "fit_")
+
+    def _confident_threshold(self) -> float:
+        try:
+            return float(self.app.settings.confident_threshold)
+        except (AttributeError, TypeError, ValueError):
+            return 95.0
+
+    def _fit_threshold(self) -> float:
+        try:
+            return float(self.app.settings.confident_fit)
+        except (AttributeError, TypeError, ValueError):
+            return 80.0
+
+    # -- Match / Fit header filters
+    def _score_heading(self, col: str) -> None:
+        label = SCORE_COLS[col][0]
+        n = self.min_score.get(col, 0)
+        self.tree.heading(col, text=f"{label} ≥{n}" if n else f"{label} ▾")
+
+    def set_min_score(self, col: str, value: int, save: bool = True) -> None:
+        value = max(0, min(100, int(value)))
+        if self.min_score.get(col) == value:
+            return
+        self.min_score[col] = value
+        self._score_heading(col)
+        attr = SCORE_COLS[col][1]
+        setattr(self.app.settings, attr, value)
+        if save:
+            try:
+                save_settings(self.app.settings)
+            except OSError:
+                pass
+        self._refill()
+
+    def _score_filter_popup(self, col: str) -> None:
+        """Header click: a small slider that hides songs whose score is below the chosen %."""
+        if self._score_popup is not None:
+            try:
+                self._score_popup.destroy()
+            except tk.TclError:
+                pass
+            self._score_popup = None
+            return
+        label = SCORE_COLS[col][0]
+        top = tk.Toplevel(self)
+        top.wm_overrideredirect(True)
+        try:
+            top.wm_attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self._score_popup = top
+        p = theme.palette()
+        frame = tk.Frame(top, background=p["surface"], highlightthickness=1, highlightbackground=p["border"], padx=10,
+                         pady=8)
+        frame.pack(fill="both", expand=True)
+        var = tk.IntVar(value=self.min_score.get(col, 0))
+        cap = tk.StringVar()
+
+        def show(*_):
+            v = int(float(var.get()))
+            cap.set(f"Show {label} ≥ {v}%" if v else f"Show every {label} score")
+        tk.Label(frame, textvariable=cap, background=p["surface"], foreground=p["fg"],
+                 font=theme.font("body")).pack(anchor="w")
+        sc = ttk.Scale(frame, from_=0, to=100, orient="horizontal", length=220,
+                       command=lambda v: (var.set(int(round(float(v)))), show()))
+        sc.set(var.get())
+        sc.pack(fill="x", pady=(6, 6))
+        theme.hint(sc, f"Hide songs whose {label} score is below this. Songs without a score stay listed.")
+        row = tk.Frame(frame, background=p["surface"])
+        row.pack(fill="x")
+
+        def close(apply: bool = True):
+            if apply:
+                self.set_min_score(col, var.get())
+            try:
+                top.destroy()
+            except tk.TclError:
+                pass
+            self._score_popup = None
+        sc.bind("<ButtonRelease-1>", lambda e: self.set_min_score(col, var.get()), add="+")
+        theme.hint(ttk.Button(row, text="Clear", command=lambda: (var.set(0), sc.set(0), close())),
+                   f"Show every {label} score again.").pack(side="left")
+        theme.hint(ttk.Button(row, text="Done", command=close), "Close the filter.").pack(side="right")
+        top.bind("<Escape>", lambda e: close())
+        top.bind("<Return>", lambda e: close())
+        show()
+        try:
+            bbox_x = sum(int(self.tree.column(c, "width")) for c in ("#0",) + self.tree["columns"][
+                :list(self.tree["columns"]).index(col)])
+        except (tk.TclError, ValueError):
+            bbox_x = 0
+        x = self.tree.winfo_rootx() + max(0, min(bbox_x, self.tree.winfo_width() - 250))
+        y = self.tree.winfo_rooty() + 26
+        top.geometry(f"+{x}+{y}")
+        top.update_idletasks()
+        try:
+            top.focus_force()
+            sc.focus_set()
+        except tk.TclError:
+            pass
+
+        top.bind("<FocusOut>", lambda e: self.after(150, lambda: self._close_popup_if_unfocused(top, close)),
+                 add="+")
+
+    def _close_popup_if_unfocused(self, top, close) -> None:
+        try:
+            if not top.winfo_exists():
+                return
+            f = top.focus_get()
+        except (tk.TclError, KeyError):
+            f = None
+        if f is None or not str(f).startswith(str(top)):
+            close()
+
+    @staticmethod
+    def has_found_lyrics(r: dict) -> bool:
+        """Lyrics were found for this song (it can be, or was, written)."""
+        return bool(r.get("local") or r.get("online") == "found" or r.get("choice") in ("custom", "remove")
+                    or r.get("status") in FOUND_STATUSES or r.get("status") in SAVED_STATUSES)
+
+    def _filter_toggled(self, key: str, var: tk.BooleanVar) -> None:
+        if key:
+            setattr(self.app.settings, key, bool(var.get()))
+            try:
+                save_settings(self.app.settings)
+            except OSError:
+                pass
+        self._refill()
+        if hasattr(self.app, "session_changed"):
+            self.app.session_changed()
 
     def _row_text(self, path) -> str:
         r = self.rows[path]
@@ -578,36 +937,52 @@ class ReviewTab(ttk.Frame):
     def _upsert(self, path):
         vals, tags = self._row_values(path), (self._row_tag(self.rows[path]),)
         parent = self._ensure_groups(path)
-        if self.tree.exists(path):
+        if path in self._shown:
             old_parent = self.tree.parent(path)
             if old_parent != parent:
                 self.tree.move(path, parent, "end")
-                self._refresh_groups(old_parent)
+                self._mark_dirty(old_parent)
             self.tree.item(path, text=self._row_text(path), values=vals, tags=tags)
         else:
             self.tree.insert(parent, "end", iid=path, text=self._row_text(path), values=vals, tags=tags)
-        self._refresh_groups(parent)
+            self._shown.add(path)
+        self._mark_dirty(parent)
 
     def _matches(self, path) -> bool:
         statuses = FILTERS.get(self.v_filter.get())
         r = self.rows[path]
         if statuses is not None and r["status"] not in statuses:
             return False
+        if self.v_only_found.get() and not self.has_found_lyrics(r):
+            return False
+        if self.v_hide_saved.get() and r["status"] in DONE_STATUSES:
+            return False
+        if self.v_hide_low.get() and r["status"] not in DONE_STATUSES:
+            c, f = self.row_confidence(r), self.row_fit(r)
+            if (c is not None and c < self._confident_threshold()) or (f is not None and f < self._fit_threshold()):
+                return False
+        for col, value in (("match", self.row_confidence(r)), ("fit", self.row_fit(r))):
+            n = self.min_score.get(col, 0)
+            if n and value is not None and value < n:
+                return False
         q = self.v_search.get().strip().casefold()
         return not q or q in f"{r['artist']} {r.get('album', '')} {r['title']} {path}".casefold()
 
     def _refill(self) -> None:
         sel = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
-        touched = set()
+        self.group_dirs.clear()
+        self._group_stats.clear()
+        self._dirty_groups.clear()
+        self._shown.clear()
         for p in self.rows:
             if self._matches(p):
                 parent = self._ensure_groups(p)
                 self.tree.insert(parent, "end", iid=p, text=self._row_text(p), values=self._row_values(p),
                                  tags=(self._row_tag(self.rows[p]),))
-                touched.add(parent)
-        for g in touched:
-            self._refresh_groups(g)
+                self._shown.add(p)
+                self._dirty_groups.add(parent)
+        self._flush_groups()
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])
             self.tree.see(sel[0])
@@ -618,15 +993,20 @@ class ReviewTab(ttk.Frame):
             st = State(self.app.settings.resolved_state_db())
             rows = st.iter_files()
             choices = {r[0]: st.current_choice(r[0]) for r in rows}
+            scores = st.all_candidate_scores()
             st.close()
         except Exception as e:
             messagebox.showerror(APP_TITLE, f"Could not read earlier results:\n{e}")
             return
         for path, status, source, artist, title, _, local, online, album in rows:
             if path not in self.rows:
+                c = scores.get(path, {})
+                lo, on = c.get("local", (None, None)), c.get("online", (None, None))
                 self.rows[path] = {"status": status, "source": source or "", "artist": artist or "",
                                    "title": title or "", "local": local or "", "online": online or "",
-                                   "choice": choices.get(path, ""), "album": album or ""}
+                                   "choice": choices.get(path, ""), "album": album or "",
+                                   "conf_local": lo[0], "conf_online": on[0], "fit_local": lo[1],
+                                   "fit_online": on[1]}
         self._refill()
         self.app.show_apply_bar()
 
@@ -639,6 +1019,9 @@ class ReviewTab(ttk.Frame):
             self.add_row(p, "")
         self.v_filter.set("All")
         self.v_search.set("")
+        self.v_only_found.set(False)
+        self.v_hide_saved.set(False)
+        self.v_hide_low.set(False)
         self._refill()
         self.tree.selection_set(p)
         self.tree.see(p)
@@ -690,6 +1073,11 @@ class ReviewTab(ttk.Frame):
         n = len(songs)
         what = f"{n} song{'s' if n != 1 else ''}"
         m = theme.register(tk.Menu(self, tearoff=0), "menu")
+        if node.startswith("grp:"):
+            m.add_command(label="Open folder", command=lambda: self.open_location(node))
+        else:
+            m.add_command(label="Open file location", command=lambda: self.open_location(node))
+        m.add_separator()
         target = "embed into" if self.app.settings.output_mode == "embed" else "save .lrc for"
         m.add_command(label=f"Save now — {target} {what}", command=lambda: self.app.apply_paths(songs))
         m.add_separator()
@@ -740,7 +1128,7 @@ class ReviewTab(ttk.Frame):
     # ------------------------------------------------------------ session
     def session_data(self) -> dict:
         return {"rows": self.rows, "selected": self.tree.focus() or "", "filter": self.v_filter.get(),
-                "search": self.v_search.get()}
+                "search": self.v_search.get(), "only_found": bool(self.v_only_found.get())}
 
     def load_session_rows(self, data: dict, include_saved: bool = False) -> int:
         """Bring back last session's songs. Songs whose lyrics were already saved (written to the file
@@ -750,7 +1138,11 @@ class ReviewTab(ttk.Frame):
         try:
             st = State(self.app.settings.resolved_state_db())
             try:
+                scores = st.all_candidate_scores()
                 for p, r in list(rows.items()):
+                    c = scores.get(p, {})
+                    lo, on = c.get("local", (None, None)), c.get("online", (None, None))
+                    r["conf_local"], r["conf_online"], r["fit_local"], r["fit_online"] = lo[0], on[0], lo[1], on[1]
                     info = st.get_file_info(p)
                     if info.get("status") in ("restored", "embedded", "lrc_written"):
                         r["status"] = info["status"]          # the database knows what happened since
@@ -762,10 +1154,11 @@ class ReviewTab(ttk.Frame):
         if not include_saved:
             rows = {p: r for p, r in rows.items() if r.get("status") not in SAVED_STATUSES}
         for p, r in rows.items():
-            base = {"status": "", "source": "", "artist": "", "title": "", "local": "", "online": "",
-                    "choice": "", "album": ""}
+            base = _blank_row()
             base.update({k: v for k, v in r.items() if k in base})
             self.rows[p] = base
+        if "only_found" in data:
+            self.v_only_found.set(bool(data["only_found"]))
         if data.get("filter") in FILTERS:
             self.v_filter.set(data["filter"])
         self.v_search.set(data.get("search", ""))
@@ -869,13 +1262,37 @@ class ReviewTab(ttk.Frame):
             info = review.gather(path, s, self._collection_for(s))
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
+        fits = {}
         if not err:
             try:
                 audio = decode(display_path(path))
             except Exception as e:
                 audio_err = f"Could not decode audio: {type(e).__name__}: {e}"
+            if audio is not None:
+                try:
+                    fits = self._store_audio_fits(path, s, audio)
+                except Exception:
+                    fits = {}
         self.app.events.put({"type": "review_loaded", "token": token, "path": path, "info": info,
-                             "audio": audio, "err": err, "audio_err": audio_err})
+                             "audio": audio, "err": err, "audio_err": audio_err, "fits": fits})
+
+    @staticmethod
+    def _store_audio_fits(path: str, s, audio) -> dict:
+        """Re-score the found lyrics against the decoded audio and save the result. {kind: fit}."""
+        st = State(s.resolved_state_db())
+        out = {}
+        try:
+            pend = st.get_pending(path)
+            for kind, (_label, text, _lp, length) in st.get_candidates(path).items():
+                f = fitmod.fit_score(text, audio.duration, length or None, audio.peaks)[0]
+                st.set_candidate_fit(path, kind, f)
+                out[kind] = f
+                if pend is not None and lrcmod.same_lyrics(pend[2], text):
+                    st.set_pending_fit(path, text, f)
+            st.commit()
+        finally:
+            st.close()
+        return out
 
     def handle(self, e: dict) -> None:
         t = e["type"]
@@ -886,6 +1303,10 @@ class ReviewTab(ttk.Frame):
                 self.v_title.set(os.path.basename(display_path(e["path"])))
                 messagebox.showerror(APP_TITLE, e["err"])
                 return
+            fits = e.get("fits") or {}
+            if fits and e["path"] in self.rows:
+                self.add_row(e["path"], fit_local=fits.get("local"), fit_online=fits.get("online"))
+                self.app.refresh_apply_bar()
             self._show_song(e["info"], e["audio"], e["audio_err"])
         elif t == "review_lrclib":
             if e["token"] != self._token or self.song is None:
@@ -1008,8 +1429,24 @@ class ReviewTab(ttk.Frame):
 
     # ========================================================== candidates
     def _fill_candidates(self) -> None:
-        labels = [c.label for c in self.cands] or ["(no candidates — try Search LRCLIB)"]
-        self.cmb_cand.config(values=labels)
+        self.cand_fit = {}
+        dur = self._duration()
+        peaks = self.audio.peaks if self.audio is not None else None
+        for c in self.cands:
+            if c.text and c.key != "current":
+                self.cand_fit[c.key] = fitmod.fit_score(c.text, dur, c.src_length or None, peaks)
+        labels = []
+        for c in self.cands:
+            f = self.cand_fit.get(c.key, (None, []))[0]
+            labels.append(f"{c.label}  ·  fit {f:.0f}%" if f is not None else c.label)
+        self.cmb_cand.config(values=labels or ["(no candidates — try Search LRCLIB)"])
+
+    def _show_fit_note(self) -> None:
+        f, why = getattr(self, "cand_fit", {}).get(self.cand.key, (None, [])) if self.cand else (None, [])
+        if f is None:
+            self.v_fit.set("")
+        else:
+            self.v_fit.set(f"Fit {f:.0f}%" + (": " + "; ".join(why) if why else ": length and timing look right"))
 
     def _select_candidate(self, idx: int, restore: dict | None = None) -> None:
         if not self.cands:
@@ -1021,6 +1458,7 @@ class ReviewTab(ttk.Frame):
         idx = max(0, min(idx, len(self.cands) - 1))
         self.cand = self.cands[idx]
         self.cmb_cand.current(idx)
+        self._show_fit_note()
         self.anchors = []
         self.sel_line = None
         if restore and restore.get("cand") == self.cand.key:
