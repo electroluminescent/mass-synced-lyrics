@@ -24,6 +24,13 @@ def selftest(audio_path: str, out_path: str) -> None:
         import tkinter
 
         lines.append(f"tk {tkinter.TkVersion}")
+        from mass_synced_lyrics import theme
+
+        root = tkinter.Tk()
+        root.withdraw()
+        theme.apply(root, "dark")
+        lines.append(f"theme: {'sun valley' if theme._state['sv'] else 'fallback (sv-ttk missing)'}")
+        root.destroy()
         lines.append("SELFTEST OK")
     except Exception as e:
         lines.append(f"SELFTEST FAILED: {type(e).__name__}: {e}")

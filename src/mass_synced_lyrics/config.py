@@ -36,7 +36,8 @@ class Settings:
     loop_checkpoints: bool = False
     playback_volume: int = 80            # review player volume, 0–100
     review_split: int = 0                # review tab: width of the song list (0 = default)
-    session_restore: str = "ask"         # on start: ask | load | fresh (last review session)
+    session_restore: str = "ask"
+    theme: str = "light"                 # light | dark         # on start: ask | load | fresh (last review session)
     log_dir: str = ""
     state_db: str = ""
 

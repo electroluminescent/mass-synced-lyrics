@@ -2,6 +2,8 @@
 
 Walks a music folder and adds **time-synced (LRC) lyrics** to each song. It has a desktop interface with a review player, plus a command line.
 
+The interface is a modern light/dark theme; switch with **Dark mode** in the header.
+
 The app works in three steps:
 
 1. **Find lyrics** (Run tab). The app scans the folder and finds lyrics. **Nothing is written yet.**

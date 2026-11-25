@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+- Modern interface: Sun Valley theme (Windows 11 style) with a header, card layout, accent buttons,
+  switches, flat green ✓ choice buttons and restyled lists and lyric panes. **Dark mode** switch in the
+  header (remembered). The waveform timeline is unchanged.
+- The "Run" tab is now **Find lyrics**; library/collection and options sit side by side.
+- Shortcut help moved into a hover tip (ⓘ) to give the lyric panes more room.
+
 ## 1.0.3
 - Sessions: the review list is saved while you work and on exit. At start the app offers to load the
   last session ("Remember my choice"; change it later on the Run tab), with an option — off by

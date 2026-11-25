@@ -40,10 +40,11 @@ if (-not (Test-Path "build\fpcalc.exe")) {
 $common = @("--noconfirm", "--clean", "--onefile", "--paths", "src", "--add-binary", "build\fpcalc.exe;.",
             "--icon", "src\mass_synced_lyrics\assets\icon.ico")
 # The GUI also needs the audio player stack (PyAV/FFmpeg for decoding, PortAudio via sounddevice).
-$player = @("--add-data", "src\mass_synced_lyrics\assets;mass_synced_lyrics\assets", "--collect-all", "av", "--collect-all", "_sounddevice_data", "--hidden-import", "sounddevice")
+$player = @("--add-data", "src\mass_synced_lyrics\assets;mass_synced_lyrics\assets", "--collect-data", "sv_ttk",
+            "--collect-all", "av", "--collect-all", "_sounddevice_data", "--hidden-import", "sounddevice")
 & $Python -m PyInstaller @common @player --windowed --name MassSyncedLyrics launchers\gui.py
 if ($LASTEXITCODE) { throw "PyInstaller (GUI) failed" }
-& $Python -m PyInstaller @common --console --exclude-module av --exclude-module sounddevice --exclude-module numpy --exclude-module tkinter --name mass-synced-lyrics-cli launchers\cli.py
+& $Python -m PyInstaller @common --console --exclude-module av --exclude-module sounddevice --exclude-module numpy --exclude-module tkinter --exclude-module sv_ttk --name mass-synced-lyrics-cli launchers\cli.py
 if ($LASTEXITCODE) { throw "PyInstaller (CLI) failed" }
 
 $pkg = "dist\MassSyncedLyrics-$version-windows"

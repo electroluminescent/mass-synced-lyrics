@@ -9,7 +9,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import APP_TITLE
+from . import APP_TITLE, theme
 from . import lrc as lrcmod
 from . import review
 from .config import save_settings
@@ -47,17 +47,8 @@ SHORT_STATUS = {
 }
 CHOICE_TEXT = {"local": "Local", "online": "Online", "keep": "Don't change", "custom": "Custom",
                "remove": "Remove lyrics", "": ""}
-ROW_COLORS = {   # tag: (background, foreground)
-    "c_local": ("#fff0c7", "#000000"),
-    "c_online": ("#dde9ff", "#000000"),
-    "c_custom": ("#ecdfff", "#000000"),
-    "c_keep": ("#f0f0f0", "#6b6b6b"),
-    "c_done": ("#d9f2e1", "#1e5631"),
-    "c_problem": ("#ffe0e0", "#7a1f1f"),
-}
 DONE_STATUSES = {"embedded", "lrc_written", "already_embedded", "unchanged"}
 PROBLEM_STATUSES = {"error", "ambiguous", "unsupported", "rejected"}
-SEL_BG, SEL_FG, SEL_ACTIVE = "#2e9d57", "#ffffff", "#278a4c"
 
 
 def ease_out(p: float) -> float:
@@ -88,8 +79,10 @@ class Tooltip:
                 self.tip.wm_attributes("-topmost", True)
             except tk.TclError:
                 pass
-            self.label = tk.Label(self.tip, justify="left", background="#fffbe6", foreground="#222",
-                                  relief="solid", borderwidth=1, padx=6, pady=3, wraplength=520)
+            p = theme.palette()
+            self.label = tk.Label(self.tip, justify="left", background=p["surface"], foreground=p["fg"],
+                                  relief="solid", borderwidth=1, padx=10, pady=6, wraplength=520,
+                                  font=theme.font("body"), highlightthickness=0)
             self.label.pack()
         self.label.config(text=text)
         self.tip.update_idletasks()
@@ -154,8 +147,7 @@ class ReviewTab(ttk.Frame):
 
     # ================================================================ layout
     def _build(self) -> None:
-        paned = tk.PanedWindow(self, orient="horizontal", sashwidth=9, sashrelief="raised", sashpad=0,
-                               showhandle=False, opaqueresize=True, background="#b9bec7", borderwidth=0)
+        paned = theme.paned(self)
         paned.pack(fill="both", expand=True)
         self._paned = paned
         self.bind("<Map>", self._first_map, add="+")
@@ -177,10 +169,8 @@ class ReviewTab(ttk.Frame):
         legend.pack(fill="x", pady=(4, 0))
         for tag, text in (("c_local", "Local"), ("c_online", "Online"), ("c_custom", "Custom"),
                           ("c_keep", "Don't change"), ("c_done", "Written"), ("c_problem", "Check")):
-            bg, fg = ROW_COLORS[tag]
-            tk.Label(legend, text=f" {text} ", background=bg, foreground=fg, relief="solid", borderwidth=1,
-                     font=("TkDefaultFont", 8)).pack(side="left", padx=(0, 3))
-        ttk.Label(left, foreground="gray", font=("TkDefaultFont", 8),
+            theme.register(tk.Label(legend, text=text), "pill", tag=tag).pack(side="left", padx=(0, 4))
+        ttk.Label(left, style="Caption.TLabel",
                   text="Click a Choice cell to switch between the lyrics found and Don't change (on an "
                        "artist/album row or a multi-selection: all of them). Ctrl/Shift+click selects several; "
                        "right-click for Save now, sources and Restore.", wraplength=520).pack(fill="x")
@@ -194,10 +184,7 @@ class ReviewTab(ttk.Frame):
                               ("online", 70, "Online"), ("choice", 108, "Choice ⟳")):
             self.tree.heading(col, text=label)
             self.tree.column(col, width=w, minwidth=40, stretch=False)
-        for tag, (bg, fg) in ROW_COLORS.items():
-            self.tree.tag_configure(tag, background=bg, foreground=fg)
-        self.tree.tag_configure("group", background="#e4e7ec", font=("TkDefaultFont", 9, "bold"))
-        self.tree.tag_configure("subgroup", background="#eef0f3")
+        theme.register(self, "callback", fn=self._restyle)
         self.tree.bind("<Button-1>", self._tree_click, add="+")
         self.tree.bind("<Button-3>", self._tree_menu)
         if sys.platform == "darwin":
@@ -222,13 +209,14 @@ class ReviewTab(ttk.Frame):
         head = ttk.Frame(right)
         head.grid(row=r, column=0, sticky="ew"); r += 1
         self.v_title = tk.StringVar(value="Select a song on the left (or Open file…).")
-        ttk.Label(head, textvariable=self.v_title, font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        ttk.Label(head, textvariable=self.v_title, style="Section.TLabel").pack(side="left")
         self.v_override = tk.StringVar()
-        ttk.Label(head, textvariable=self.v_override, foreground="#7a4d00").pack(side="right")
+        ttk.Label(head, textvariable=self.v_override, style="Muted.TLabel").pack(side="right")
 
         tr = ttk.Frame(right)
         tr.grid(row=r, column=0, sticky="ew", pady=(4, 2)); r += 1
-        self.btn_play = ttk.Button(tr, text="▶ Play", width=9, command=self._toggle_play)
+        self.btn_play = ttk.Button(tr, text="▶ Play", width=9, command=self._toggle_play,
+                                   style="Accent.TButton" if theme._state["sv"] else "TButton")
         self.btn_play.pack(side="left")
         ttk.Button(tr, text="−5s", width=4, command=lambda: self._nudge(-5)).pack(side="left", padx=(4, 0))
         ttk.Button(tr, text="+5s", width=4, command=lambda: self._nudge(5)).pack(side="left", padx=(2, 8))
@@ -244,11 +232,11 @@ class ReviewTab(ttk.Frame):
         self.sld_volume.bind("<ButtonRelease-1>", lambda e: self._save_globals())
         self.player.volume = self.v_volume.get() / 100.0
         self.v_audio_note = tk.StringVar()
-        ttk.Label(right, textvariable=self.v_audio_note, foreground="#a33").grid(row=r, column=0, sticky="w"); r += 1
+        ttk.Label(right, textvariable=self.v_audio_note, style="Caption.TLabel").grid(row=r, column=0, sticky="w"); r += 1
 
         self.ov = tk.Canvas(right, height=78, background=BG, highlightthickness=0, cursor="crosshair")
         self.ov.grid(row=r, column=0, sticky="ew"); r += 1
-        self.cpbar = tk.Canvas(right, height=26, highlightthickness=0)
+        self.cpbar = theme.register(tk.Canvas(right, height=28, highlightthickness=0), "bg")
         self.cpbar.grid(row=r, column=0, sticky="ew"); r += 1
         cpr = ttk.Frame(right)
         cpr.grid(row=r, column=0, sticky="ew", pady=(0, 3)); r += 1
@@ -263,53 +251,59 @@ class ReviewTab(ttk.Frame):
         ttk.Button(cpr, text="Reset points", command=self._default_checkpoints).pack(side="left")
         self.sc = tk.Canvas(right, height=128, background=BG, highlightthickness=0, cursor="sb_h_double_arrow")
         self.sc.grid(row=r, column=0, sticky="ew"); r += 1
-        self.lbl_hint = ttk.Label(right, foreground="gray", wraplength=600, text=(
+        self._hint_text = (
             "Drag either waveform to scrub. Overview: click = add checkpoint · Ctrl+click or right-click = remove · "
             "Shift+click = jump there · "
             "right-click a ▶ button to delete that checkpoint. New lyrics: click 📌 to pin a line, click a time "
             "to edit it (empty = reset), right-click a line for more. Keys work unless you're typing in a box.  "
             "Keys 1–9 play checkpoints, 0 = next, Space = play/pause. Lanes: current (gold) / new (green)."
-        ))
-        self.lbl_hint.grid(row=r, column=0, sticky="ew"); r += 1
-        right.bind("<Configure>", lambda e: self.lbl_hint.config(wraplength=max(200, e.width - 12)), add="+")
+        )
+        self.lbl_hint = ttk.Label(right, text="ⓘ  Mouse & keyboard shortcuts (hover)", style="Caption.TLabel",
+                                  cursor="question_arrow")
+        self.lbl_hint.grid(row=r, column=0, sticky="w", pady=(2, 0)); r += 1
+        self.lbl_hint.bind("<Enter>", lambda e: self.tooltip.show(self._hint_text, e.x_root, e.y_root + 200))
+        self.lbl_hint.bind("<Leave>", lambda e: self.tooltip.hide())
 
-        tm = ttk.LabelFrame(right, text="Timing of the new lyrics", padding=4)
-        tm.grid(row=r, column=0, sticky="ew", pady=(4, 2)); r += 1
+        tcard = theme.card(right, padding=(12, 8))
+        tcard.grid(row=r, column=0, sticky="ew", pady=(8, 4)); r += 1
+        ttk.Label(tcard, text="Timing of the new lyrics", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        cs = "Card.TFrame" if theme._state["sv"] else "TFrame"
+        tm = ttk.Frame(tcard, style=cs)
+        tm.pack(fill="x")
         ttk.Label(tm, text="Offset (ms)").pack(side="left")
         self.v_offset = tk.DoubleVar(value=0.0)
-        ttk.Spinbox(tm, from_=-600000, to=600000, increment=50, width=8, textvariable=self.v_offset
+        ttk.Spinbox(tm, from_=-600000, to=600000, increment=50, width=7, textvariable=self.v_offset
                     ).pack(side="left", padx=(2, 10))
         ttk.Label(tm, text="Stretch (%)").pack(side="left")
         self.v_stretch = tk.DoubleVar(value=100.0)
-        ttk.Spinbox(tm, from_=50, to=200, increment=0.05, width=8, textvariable=self.v_stretch
+        ttk.Spinbox(tm, from_=50, to=200, increment=0.05, width=7, textvariable=self.v_stretch
                     ).pack(side="left", padx=(2, 10))
         ttk.Button(tm, text="Stretch to song length", command=self._stretch_to_length).pack(side="left")
-        tm2 = ttk.Frame(right)
-        tm2.grid(row=r, column=0, sticky="ew", pady=(0, 2)); r += 1
-        ttk.Button(tm2, text="Align selected line to playhead", command=self._align).pack(side="left", padx=(4, 8))
+        tm2 = ttk.Frame(tcard, style=cs)
+        tm2.pack(fill="x", pady=(8, 0))
+        ttk.Button(tm2, text="Align selected line to playhead", command=self._align).pack(side="left", padx=(0, 8))
         ttk.Label(tm2, text="Pins & edits:").pack(side="left", padx=(0, 4))
-        self.btn_interp = tk.Button(tm2, text="Interpolate from pins", command=self._toggle_interpolate, padx=6)
+        self.btn_interp = theme.flat_button(tm2, "Interpolate from pins", self._toggle_interpolate, padx=10)
         self.btn_interp.pack(side="left")
         ttk.Button(tm2, text="Clear pins", command=self.clear_pins).pack(side="left", padx=(6, 0))
         ttk.Button(tm2, text="Clear edited times", command=self.clear_edits).pack(side="left", padx=(4, 0))
         self.v_pins = tk.StringVar()
-        ttk.Label(tm2, textvariable=self.v_pins, foreground="gray").pack(side="left", padx=8)
-        self._interp_default = (self.btn_interp.cget("background"), self.btn_interp.cget("foreground"),
-                                self.btn_interp.cget("activebackground"))
+        ttk.Label(tm2, textvariable=self.v_pins, style="Muted.TLabel").pack(side="left", padx=8)
         self.spn_offset = None
         self.v_anchors = tk.StringVar(value="")
-        ttk.Label(tm, textvariable=self.v_anchors, foreground="gray").pack(side="left", padx=6)
+        ttk.Label(tm, textvariable=self.v_anchors, style="Muted.TLabel").pack(side="left", padx=6)
         ttk.Button(tm, text="Reset timing", command=self._reset_timing).pack(side="right")
         self.v_offset.trace_add("write", lambda *a: self._timing_changed())
         self.v_stretch.trace_add("write", lambda *a: self._timing_changed())
 
         right.rowconfigure(r, weight=1)
-        lp = tk.PanedWindow(right, orient="horizontal", sashwidth=9, sashrelief="raised", opaqueresize=True,
-                            background="#b9bec7", borderwidth=0)
+        lp = theme.paned(right)
         lp.grid(row=r, column=0, sticky="nsew"); r += 1
-        lf = ttk.LabelFrame(lp, text="Current (embedded)", padding=4)
-        self.frm_cur = lf
-        nf = ttk.LabelFrame(lp, text="New", padding=4)
+        lf = theme.card(lp, padding=(10, 8))
+        self.lbl_cur = ttk.Label(lf, text="Current (embedded)", style="Section.TLabel")
+        self.lbl_cur.pack(anchor="w", pady=(0, 6))
+        nf = theme.card(lp, padding=(10, 8))
+        ttk.Label(nf, text="New", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
         lp.add(lf, minsize=180, stretch="always")
         lp.add(nf, minsize=180, stretch="always")
         self._lyrics_paned = lp
@@ -318,12 +312,10 @@ class ReviewTab(ttk.Frame):
         self.cmb_cand.pack(fill="x", pady=(0, 4))
         self.cmb_cand.bind("<<ComboboxSelected>>", lambda e: (self._select_candidate(self.cmb_cand.current()),
                                                               self._grab_keys()))
-        self.btn_keep = tk.Button(lf, text="Keep current", command=self._lock, padx=10, pady=3)
-        self.btn_keep.pack(side="bottom", fill="x", pady=(4, 0))
-        self.btn_apply = tk.Button(nf, text="Use new", command=self._apply, padx=10, pady=3)
-        self.btn_apply.pack(side="bottom", fill="x", pady=(4, 0))
-        self._btn_default = (self.btn_keep.cget("background"), self.btn_keep.cget("foreground"),
-                             self.btn_keep.cget("activebackground"))
+        self.btn_keep = theme.flat_button(lf, "Keep current", self._lock, pady=8)
+        self.btn_keep.pack(side="bottom", fill="x", pady=(8, 0))
+        self.btn_apply = theme.flat_button(nf, "Use new", self._apply, pady=8)
+        self.btn_apply.pack(side="bottom", fill="x", pady=(8, 0))
         self.txt_cur = self._lyrics_text(lf, "cur")
         self.txt_new = self._lyrics_text(nf, "new")
 
@@ -331,7 +323,7 @@ class ReviewTab(ttk.Frame):
         act.grid(row=r, column=0, sticky="ew", pady=(6, 0)); r += 1
         ttk.Button(act, text="Reset to default (clear my choice)", command=self._clear).pack(side="left")
         self.v_choice_note = tk.StringVar()
-        ttk.Label(act, textvariable=self.v_choice_note, foreground="gray").pack(side="left", padx=8)
+        ttk.Label(act, textvariable=self.v_choice_note, style="Muted.TLabel").pack(side="left", padx=8)
         ttk.Button(act, text="Search LRCLIB", command=self._search_lrclib).pack(side="right")
 
         self.tooltip = Tooltip(self)
@@ -359,6 +351,34 @@ class ReviewTab(ttk.Frame):
         self.after(50, lambda: self._paned.sash_place(0, x, 1))
         self._paned.bind("<ButtonRelease-1>", self._save_split, add="+")
 
+    def _tag_lyrics(self, t: tk.Text) -> None:
+        p = theme.palette()
+        t.tag_configure("ts", foreground=p["muted"])
+        t.tag_configure("now", background=p["now"])
+        t.tag_configure("pick", background=p["pick"])
+        t.tag_configure("unpinned", foreground=p["border"] if theme.mode() == "dark" else "#b5b5b5")
+        t.tag_configure("pinned", foreground=p["pin"])
+        t.tag_configure("ts_pinned", background=p["ts_pinned"], foreground=p["ts_pinned_fg"])
+        t.tag_configure("edited", background=p["edited"], foreground=p["edited_fg"], font=theme.font("strong"))
+        t.tag_raise("now")
+        t.tag_raise("edited")
+
+    def _restyle(self) -> None:
+        """Re-apply palette colours (light/dark switch)."""
+        p = theme.palette()
+        for tag, (bg, fg) in p["rows"].items():
+            if tag in ("group", "subgroup"):
+                self.tree.tag_configure(tag, background=bg, foreground=fg,
+                                        font=theme.font("strong") if tag == "group" else theme.font("body"))
+            else:
+                self.tree.tag_configure(tag, background=bg, foreground=fg)
+        for t in (getattr(self, "txt_cur", None), getattr(self, "txt_new", None)):
+            if t is not None:
+                self._tag_lyrics(t)
+        if hasattr(self, "btn_keep"):
+            self._update_choice_buttons()
+            self._style_interp()
+
     def _even_lyrics_split(self) -> None:
         if getattr(self, "_lyrics_split_done", False):
             return
@@ -382,19 +402,15 @@ class ReviewTab(ttk.Frame):
     def _lyrics_text(self, parent, which: str) -> tk.Text:
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
-        t = tk.Text(frame, wrap="word", height=12, cursor="arrow", state="disabled",
-                    font=("Segoe UI", 10) if os.name == "nt" else ("TkDefaultFont", 10))
+        t = tk.Text(frame, wrap="word", height=12, cursor="arrow", state="disabled", spacing1=2, spacing3=2)
+        theme.register(t, "text")
         sb = ttk.Scrollbar(frame, orient="vertical", command=t.yview)
         t.configure(yscrollcommand=lambda a, b, w=which, bar=sb: (bar.set(a, b), self._on_lyrics_scroll(w)))
         t.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        t.tag_configure("ts", foreground="#888")
-        t.tag_configure("now", background="#d3f2cf")
-        t.tag_configure("pick", background="#cfe8ff")
-        t.tag_configure("unpinned", foreground="#b0b0b0")
-        t.tag_configure("edited", background="#ffe14d", foreground="#3d3000", font=("TkDefaultFont", 9, "bold"))
-        t.tag_configure("pinned", foreground="#c0392b")
-        t.tag_configure("ts_pinned", background="#fff59d", foreground="#5d4a00")
+
+
+        self._tag_lyrics(t)
         t.tag_bind("pin", "<Enter>", lambda e, w=t: w.config(cursor="hand2"))
         t.tag_bind("pin", "<Leave>", lambda e, w=t: w.config(cursor="arrow"))
         t.bind("<Button-1>", lambda e, w=which: self._line_click(w, e))
@@ -604,7 +620,7 @@ class ReviewTab(ttk.Frame):
             return "break"
         n = len(songs)
         what = f"{n} song{'s' if n != 1 else ''}"
-        m = tk.Menu(self, tearoff=0)
+        m = theme.register(tk.Menu(self, tearoff=0), "menu")
         target = "embed into" if self.app.settings.output_mode == "embed" else "save .lrc for"
         m.add_command(label=f"Save now — {target} {what}", command=lambda: self.app.apply_paths(songs))
         m.add_separator()
@@ -839,7 +855,7 @@ class ReviewTab(ttk.Frame):
             self.player.load(audio)
         self.v_audio_note.set(audio_err)
         lrc_mode = self.app.settings.output_mode == "lrc"
-        self.frm_cur.config(text="Current (.lrc file beside the song)" if lrc_mode else "Current (embedded)")
+        self.lbl_cur.config(text="Current (.lrc file beside the song)" if lrc_mode else "Current (embedded)")
         self.cur_lines = lrcmod.display_lines(info.current)
         self.cur_segs = lrcmod.segments(info.current, self._duration())
         self._render(self.txt_cur, self.cur_lines,
@@ -876,13 +892,8 @@ class ReviewTab(ttk.Frame):
             self.v_override.set(f"Per-file choice: {ov[2] or 'chosen lyrics'} — written when you apply")
 
     def _style_btn(self, btn: tk.Button, selected: bool, text: str) -> None:
-        if selected:
-            btn.config(text="✓ " + text, background=SEL_BG, foreground=SEL_FG, activebackground=SEL_ACTIVE,
-                       activeforeground=SEL_FG, font=("TkDefaultFont", 9, "bold"))
-        else:
-            bg, fg, abg = self._btn_default
-            btn.config(text=text, background=bg, foreground=fg, activebackground=abg, activeforeground=fg,
-                       font=("TkDefaultFont", 9))
+        btn.config(text=("✓  " + text) if selected else text)
+        theme.set_flat_kind(btn, "success" if selected else "neutral")
 
     def _update_choice_buttons(self) -> None:
         """Green ✓ on whichever of Keep current / Use new Apply will do for this file."""
@@ -1083,12 +1094,11 @@ class ReviewTab(ttk.Frame):
         self.v_pins.set(f"{n_pin} pinned · {n_edit} edited" if (n_pin or n_edit) else "")
         if self.interpolate:
             n = len(self.pins)
-            self.btn_interp.config(text=f"✓ Interpolated from {n} pin{'s' if n != 1 else ''}", background=SEL_BG,
-                                   foreground=SEL_FG, activebackground=SEL_ACTIVE, activeforeground=SEL_FG)
+            self.btn_interp.config(text=f"✓  Interpolated from {n} pin{'s' if n != 1 else ''}")
+            theme.set_flat_kind(self.btn_interp, "success")
         else:
-            bg, fg, abg = self._interp_default
-            self.btn_interp.config(text="Interpolate from pins", background=bg, foreground=fg,
-                                   activebackground=abg, activeforeground=fg)
+            self.btn_interp.config(text="Interpolate from pins")
+            theme.set_flat_kind(self.btn_interp, "neutral")
 
     def toggle_pin(self, idx: int) -> None:
         """Pin / unpin a New-pane line at its current time."""
@@ -1182,7 +1192,7 @@ class ReviewTab(ttk.Frame):
         if not (0 <= idx < len(self.new_lines)) or self.new_lines[idx][0] is None or not self.orig_lines:
             return "break"
         key = self._line_key(idx)
-        m = tk.Menu(self, tearoff=0)
+        m = theme.register(tk.Menu(self, tearoff=0), "menu")
         m.add_command(label="Edit time…", command=lambda: self._edit_time(idx))
         m.add_command(label=f"Set to playhead ({fmt_time(self.player.position())})",
                       command=lambda: self.set_line_time(idx, self.player.position()))
@@ -1368,8 +1378,9 @@ class ReviewTab(ttk.Frame):
             return
         for i, t in enumerate(self.checkpoints):
             label = f"▶{i + 1}" if i < 9 else "▶"
-            b = tk.Button(self.cpbar, text=label, padx=2, pady=0, borderwidth=1, font=("TkDefaultFont", 8),
-                          command=lambda k=i: self.play_checkpoint(k), takefocus=0)
+            b = theme.flat_button(self.cpbar, label, lambda k=i: self.play_checkpoint(k), padx=6, pady=1,
+                                  takefocus=0)
+            theme.set_flat_kind(b, "accent")
             for seq in ("<Button-3>", "<Button-2>") if sys.platform == "darwin" else ("<Button-3>",):
                 b.bind(seq, lambda e, k=i: self.delete_checkpoint(k))
             x = min(max(t / dur * w, 16), w - 16)

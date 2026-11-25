@@ -9,9 +9,8 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 
-from . import APP_TITLE, DEFAULT_ACOUSTID_KEY, __version__
+from . import APP_TITLE, DEFAULT_ACOUSTID_KEY, __version__, theme
 from .config import Settings, load_settings, save_settings
 from .engine import STATUS_LABELS, Engine, display_path
 from .paths import state_key
@@ -45,10 +44,11 @@ class App(tk.Tk):
     def __init__(self, settings: Settings | None = None):
         super().__init__()
         self.title(f"{APP_TITLE} {__version__}")
-        self.minsize(980, 700)
+        self.minsize(1100, 760)
         self.geometry("1440x920")
         self._set_icon()
         self.settings = settings or load_settings()
+        self.option_add("*tearOff", False)
         self.events: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self.cancel = threading.Event()
@@ -74,42 +74,54 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------- layout
     def _build(self) -> None:
-        pad = {"padx": 8, "pady": 4}
+        theme.apply(self, self.settings.theme)
+        self._build_header()
         self._build_apply_bar()
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=6, pady=6)
-        root = ttk.Frame(self.nb, padding=10)
-        self.nb.add(root, text="  Run  ")
+        self.nb.pack(fill="both", expand=True, padx=14, pady=(4, 8))
+        root = ttk.Frame(self.nb, padding=(16, 14))
+        self.nb.add(root, text="   Find lyrics   ")
         from .review_ui import ReviewTab
         self.review = ReviewTab(self.nb, self)
-        self.nb.add(self.review, text="  Review & player  ")
+        self.nb.add(self.review, text="   Review & player   ")
         self.bind_all("<Key>", self._on_key)
-        root.columnconfigure(0, weight=1)
+        root.columnconfigure(0, weight=3, uniform="cols")
+        root.columnconfigure(1, weight=2, uniform="cols")
+        root.rowconfigure(1, weight=1)
 
-        lib = ttk.LabelFrame(root, text="Music folder", padding=8)
-        lib.grid(row=0, column=0, sticky="ew", **pad)
+        # ---- left column: library + collection
+        lib = theme.card(root)
+        lib.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
         lib.columnconfigure(0, weight=1)
+        ttk.Label(lib, text="Music library", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(lib, text="The folder to scan (sub-folders included).", style="Caption.TLabel"
+                  ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.v_folder = tk.StringVar()
-        ttk.Entry(lib, textvariable=self.v_folder).grid(row=0, column=0, sticky="ew")
-        ttk.Button(lib, text="Browse…", command=self._browse_music).grid(row=0, column=1, padx=(6, 0))
+        ttk.Entry(lib, textvariable=self.v_folder).grid(row=2, column=0, sticky="ew")
+        ttk.Button(lib, text="Browse…", command=self._browse_music).grid(row=2, column=1, padx=(8, 0))
 
-        col = ttk.LabelFrame(root, text="Personal LRC collection (used before LRCLIB)", padding=8)
-        col.grid(row=1, column=0, sticky="ew", **pad)
-        col.columnconfigure(0, weight=1)
+        ttk.Separator(lib).grid(row=3, column=0, columnspan=2, sticky="ew", pady=14)
+        ttk.Label(lib, text="Your own LRC collection", style="Section.TLabel").grid(row=4, column=0, sticky="w")
+        ttk.Label(lib, text="Folders or .lrc files to use before searching online.", style="Caption.TLabel"
+                  ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.v_use_collection = tk.BooleanVar()
-        ttk.Checkbutton(col, text="Use these .lrc folders/files", variable=self.v_use_collection
-                        ).grid(row=0, column=0, sticky="w")
-        self.lst_collection = tk.Listbox(col, height=4, selectmode="extended")
-        self.lst_collection.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        btns = ttk.Frame(col)
-        btns.grid(row=1, column=1, sticky="n", padx=(6, 0), pady=(4, 0))
+        ttk.Checkbutton(lib, text="Use these folders / files", variable=self.v_use_collection,
+                        style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
+                        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
+        self.lst_collection = theme.register(tk.Listbox(lib, height=5, selectmode="extended"), "listbox")
+        self.lst_collection.grid(row=7, column=0, sticky="nsew")
+        btns = ttk.Frame(lib, style="Card.TFrame" if theme._state["sv"] else "TFrame")
+        btns.grid(row=7, column=1, sticky="n", padx=(8, 0))
         ttk.Button(btns, text="Add folder…", command=self._add_collection_folder).pack(fill="x")
-        ttk.Button(btns, text="Add files…", command=self._add_collection_files).pack(fill="x", pady=2)
+        ttk.Button(btns, text="Add files…", command=self._add_collection_files).pack(fill="x", pady=6)
         ttk.Button(btns, text="Remove", command=self._remove_collection).pack(fill="x")
 
-        opt = ttk.LabelFrame(root, text="Options", padding=8)
-        opt.grid(row=2, column=0, sticky="ew", **pad)
+        # ---- right column: options
+        opt = theme.card(root)
+        opt.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
         opt.columnconfigure(1, weight=1)
+        ttk.Label(opt, text="Options", style="Section.TLabel").grid(row=0, column=0, columnspan=2, sticky="w",
+                                                                    pady=(0, 8))
         self.v_online = tk.BooleanVar()
         self.v_acoustid = tk.BooleanVar()
         self.v_key = tk.StringVar()
@@ -117,59 +129,103 @@ class App(tk.Tk):
         self.v_mtime = tk.BooleanVar()
         self.v_threshold = tk.IntVar()
         self.v_retry = tk.BooleanVar()
-        r = 0
-        ttk.Checkbutton(opt, text="Look up missing lyrics online (LRCLIB)", variable=self.v_online
-                        ).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Checkbutton(opt, text="Identify untagged files with AcoustID", variable=self.v_acoustid
-                        ).grid(row=r, column=0, sticky="w")
-        kf = ttk.Frame(opt)
-        kf.grid(row=r, column=1, columnspan=2, sticky="ew"); r += 1
-        ttk.Label(kf, text="API key:").pack(side="left", padx=(12, 4))
-        self.ent_key = ttk.Entry(kf, textvariable=self.v_key, show="•", width=24)
-        self.ent_key.pack(side="left")
+        sw = "Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
+        r = 1
+        for text, var in (("Look up missing lyrics online (LRCLIB)", self.v_online),
+                          ("Identify untagged files with AcoustID", self.v_acoustid)):
+            ttk.Checkbutton(opt, text=text, variable=var, style=sw).grid(row=r, column=0, columnspan=2,
+                                                                       sticky="w", pady=2); r += 1
+        kf = ttk.Frame(opt, style="Card.TFrame" if theme._state["sv"] else "TFrame")
+        kf.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(2, 0)); r += 1
+        kf.columnconfigure(1, weight=1)
+        ttk.Label(kf, text="AcoustID key").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ent_key = ttk.Entry(kf, textvariable=self.v_key, show="•")
+        self.ent_key.grid(row=0, column=1, sticky="ew")
         self.v_showkey = tk.BooleanVar()
         ttk.Checkbutton(kf, text="Show", variable=self.v_showkey,
                         command=lambda: self.ent_key.config(show="" if self.v_showkey.get() else "•")
-                        ).pack(side="left", padx=4)
-        ttk.Label(kf, text=("(blank = built-in key) " if DEFAULT_ACOUSTID_KEY else "")
-                  + "application key from acoustid.org/new-application", foreground="gray").pack(side="left")
-        ttk.Label(opt, text="After using a sidecar .lrc:").grid(row=r, column=0, sticky="w")
-        self.cmb_action = ttk.Combobox(opt, state="readonly", width=24,
-                                       values=[lbl for _, lbl in LRC_ACTIONS])
-        self.cmb_action.grid(row=r, column=1, sticky="w"); r += 1
-        ttk.Label(opt, text="Match confidence (70–100):").grid(row=r, column=0, sticky="w")
-        ttk.Spinbox(opt, from_=70, to=100, textvariable=self.v_threshold, width=6
-                    ).grid(row=r, column=1, sticky="w"); r += 1
-        ttk.Checkbutton(opt, text="Keep original file modified dates", variable=self.v_mtime
-                        ).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Checkbutton(opt, text="Retry tracks not found in earlier runs", variable=self.v_retry
-                        ).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Label(opt, text="When the app starts:").grid(row=r, column=0, sticky="w")
-        self.cmb_session = ttk.Combobox(opt, state="readonly", width=34, values=[v for _, v in SESSION_MODES])
-        self.cmb_session.grid(row=r, column=1, sticky="w"); r += 1
+                        ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Label(opt, text=("Blank = built-in key. " if DEFAULT_ACOUSTID_KEY else "")
+                  + "Needs an application key from acoustid.org/new-application.", style="Caption.TLabel",
+                  wraplength=420).grid(row=r, column=0, columnspan=2, sticky="w", pady=(2, 8)); r += 1
+        for label, widget in (("After using a sidecar .lrc", "action"), ("Match confidence (70–100)", "thr"),
+                              ("When the app starts", "session")):
+            ttk.Label(opt, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
+            if widget == "action":
+                self.cmb_action = ttk.Combobox(opt, state="readonly", values=[lbl for _, lbl in LRC_ACTIONS])
+                self.cmb_action.grid(row=r, column=1, sticky="ew")
+            elif widget == "thr":
+                ttk.Spinbox(opt, from_=70, to=100, textvariable=self.v_threshold, width=8
+                            ).grid(row=r, column=1, sticky="w")
+            else:
+                self.cmb_session = ttk.Combobox(opt, state="readonly", values=[v for _, v in SESSION_MODES])
+                self.cmb_session.grid(row=r, column=1, sticky="ew")
+            r += 1
+        for text, var in (("Keep original file modified dates", self.v_mtime),
+                          ("Retry songs not found in earlier runs", self.v_retry)):
+            ttk.Checkbutton(opt, text=text, variable=var, style=sw).grid(row=r, column=0, columnspan=2,
+                                                                       sticky="w", pady=2); r += 1
 
-        act = ttk.Frame(root)
-        act.grid(row=3, column=0, sticky="ew", **pad)
-        self.btn_start = ttk.Button(act, text="Find lyrics", command=self._start)
+        # ---- bottom: actions + activity
+        act = theme.card(root)
+        act.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        act.columnconfigure(0, weight=1)
+        act.rowconfigure(3, weight=1)
+        top = ttk.Frame(act, style="Card.TFrame" if theme._state["sv"] else "TFrame")
+        top.grid(row=0, column=0, sticky="ew")
+        self.btn_start = ttk.Button(top, text="  Find lyrics  ", command=self._start,
+                                    style="Accent.TButton" if theme._state["sv"] else "TButton")
         self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(act, text="Stop", command=self._stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=6)
-        ttk.Button(act, text="Open logs folder", command=self._open_logs).pack(side="right")
-        self.btn_csv = ttk.Button(act, text="Open last CSV", command=self._open_csv, state="disabled")
-        self.btn_csv.pack(side="right", padx=6)
-
-        prog = ttk.Frame(root)
-        prog.grid(row=4, column=0, sticky="ew", **pad)
-        prog.columnconfigure(0, weight=1)
-        self.progress = ttk.Progressbar(prog, mode="determinate")
-        self.progress.grid(row=0, column=0, sticky="ew")
+        self.btn_stop = ttk.Button(top, text="Stop", command=self._stop, state="disabled")
+        self.btn_stop.pack(side="left", padx=8)
+        ttk.Label(top, text="Nothing is written until you press Apply at the bottom.", style="Caption.TLabel"
+                  ).pack(side="left", padx=8)
+        ttk.Button(top, text="Open logs folder", command=self._open_logs).pack(side="right")
+        self.btn_csv = ttk.Button(top, text="Open last CSV", command=self._open_csv, state="disabled")
+        self.btn_csv.pack(side="right", padx=8)
+        self.progress = ttk.Progressbar(act, mode="determinate")
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(12, 4))
         self.v_status = tk.StringVar(value="Ready.")
-        ttk.Label(prog, textvariable=self.v_status).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(act, textvariable=self.v_status, style="Muted.TLabel").grid(row=2, column=0, sticky="w",
+                                                                            pady=(0, 8))
+        logf = ttk.Frame(act, style="Card.TFrame" if theme._state["sv"] else "TFrame")
+        logf.grid(row=3, column=0, sticky="nsew")
+        logf.columnconfigure(0, weight=1)
+        logf.rowconfigure(0, weight=1)
+        self.txt = tk.Text(logf, height=10, wrap="none", state="disabled",
+                           font=("Cascadia Mono", 9) if os.name == "nt" else ("Monospace", 9))
+        theme.register(self.txt, "text", mono=True)
+        sb = ttk.Scrollbar(logf, orient="vertical", command=self.txt.yview)
+        self.txt.configure(yscrollcommand=sb.set)
+        self.txt.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
 
-        root.rowconfigure(5, weight=1)
-        self.txt = ScrolledText(root, height=14, wrap="none", state="disabled",
-                                font=("Consolas", 9) if os.name == "nt" else ("Monospace", 9))
-        self.txt.grid(row=5, column=0, sticky="nsew", **pad)
+    def _build_header(self) -> None:
+        head = ttk.Frame(self, padding=(18, 12, 18, 4))
+        head.pack(side="top", fill="x")
+        self.header = head
+        try:
+            base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+            self._logo = tk.PhotoImage(file=os.path.join(base, "icon-256.png")).subsample(6, 6)
+            ttk.Label(head, image=self._logo).pack(side="left", padx=(0, 12))
+        except (tk.TclError, OSError):
+            pass
+        titles = ttk.Frame(head)
+        titles.pack(side="left")
+        ttk.Label(titles, text=APP_TITLE, style="App.Title.TLabel").pack(anchor="w")
+        ttk.Label(titles, text=f"Find, review and apply time-synced lyrics · v{__version__}",
+                  style="Muted.TLabel").pack(anchor="w")
+        self.v_dark = tk.BooleanVar(value=self.settings.theme == "dark")
+        ttk.Checkbutton(head, text="Dark mode", variable=self.v_dark, command=self._toggle_theme,
+                        style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton").pack(side="right")
+
+    def _toggle_theme(self) -> None:
+        self.settings.theme = "dark" if self.v_dark.get() else "light"
+        theme.apply(self, self.settings.theme)
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ settings
     def _load_into_widgets(self) -> None:
@@ -278,23 +334,25 @@ class App(tk.Tk):
 
     # -------------------------------------------------- final step (bottom bar)
     def _build_apply_bar(self) -> None:
-        bar = ttk.Frame(self, padding=(12, 6, 12, 8))
-        self.apply_bar = bar
-        ttk.Separator(bar, orient="horizontal").pack(fill="x", pady=(0, 6))
-        row = ttk.Frame(bar)
+        outer = ttk.Frame(self, padding=(14, 0, 14, 12))
+        self.apply_bar = outer
+        bar = theme.card(outer, padding=(16, 10))
+        bar.pack(fill="x")
+        row = ttk.Frame(bar, style="Card.TFrame" if theme._state["sv"] else "TFrame")
         row.pack(fill="x")
-        ttk.Label(row, text="Final step:", font=("TkDefaultFont", 10, "bold")).pack(side="left")
+        ttk.Label(row, text="Final step", style="Section.TLabel").pack(side="left", padx=(0, 14))
         self.v_output = tk.StringVar(value="embed")
         ttk.Radiobutton(row, text="Overwrite files (embed lyrics)", value="embed", variable=self.v_output,
-                        command=self._output_changed).pack(side="left", padx=(10, 4))
+                        command=self._output_changed).pack(side="left", padx=(0, 10))
         ttk.Radiobutton(row, text="Save .lrc beside each file", value="lrc", variable=self.v_output,
-                        command=self._output_changed).pack(side="left", padx=4)
-        self.btn_apply_all = ttk.Button(row, text="Apply", command=self._apply_all)
+                        command=self._output_changed).pack(side="left")
+        self.btn_apply_all = ttk.Button(row, text="Apply", command=self._apply_all,
+                                        style="Accent.TButton" if theme._state["sv"] else "TButton")
         self.btn_apply_all.pack(side="right")
         self.btn_apply_stop = ttk.Button(row, text="Stop", command=self._apply_stop)
         self.apply_progress = ttk.Progressbar(row, mode="determinate", length=160)
         self.v_apply = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self.v_apply).pack(side="right", padx=10)
+        ttk.Label(row, textvariable=self.v_apply, style="Muted.TLabel").pack(side="right", padx=12)
         self.apply_worker: threading.Thread | None = None
         self.apply_cancel = threading.Event()
         self._apply_bar_shown = False
@@ -453,7 +511,7 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         frm = ttk.Frame(dlg, padding=16)
         frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="Load your last session?", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(frm, text="Load your last session?", style="Section.TLabel").pack(anchor="w")
         folder = data.get("music_folder") or "your music folder"
         ttk.Label(frm, text=f"{n} song{'s' if n != 1 else ''} from {folder}, saved {when}.",
                   wraplength=460).pack(anchor="w", pady=(4, 10))
@@ -484,7 +542,8 @@ class App(tk.Tk):
             if restore:
                 self.restore_paths(list(data["rows"].keys()), confirm=False)
         ttk.Button(btns, text="Start fresh", command=lambda: finish(False)).pack(side="right")
-        ttk.Button(btns, text="Load session", command=lambda: finish(True)).pack(side="right", padx=6)
+        ttk.Button(btns, text="Load session", command=lambda: finish(True),
+                   style="Accent.TButton" if theme._state["sv"] else "TButton").pack(side="right", padx=6)
         dlg.protocol("WM_DELETE_WINDOW", lambda: finish(False))
         self._session_finish = finish
         dlg.update_idletasks()
