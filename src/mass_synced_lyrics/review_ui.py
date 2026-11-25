@@ -80,7 +80,9 @@ COLUMN_HINTS = {
           "spread over the song and, once the audio has been checked, lines that start on silence. "
           "Click the header to filter by it.",
     "find": "Find lyrics: ⟳ being looked up now · ✓ done · ✗ error.",
-    "align": "Alignment. ⚡ = on the GPU: ⟳ 42% aligning now · ⚡✓ re-timed · ⚡– heard too little, kept as found · "
+    "align": "Alignment. ⚡ = on the GPU: ⟳ 42% aligning now · ⚡✓ re-timed · ⚡≈ partly: fewer words heard than "
+             "Aligned lyrics must match, so only the lines it was sure of were placed (check it) · "
+             "⚡– heard too little, kept as found · "
              "⚡✗ error. ✎ = timing you set yourself in the player (offset, stretch, pins or edited times). "
              "Empty = not aligned.",
     "save": "Saving (Apply / Save now): ⟳ writing now · ✓ written · – already up to date · ✗ error.",
@@ -90,7 +92,7 @@ COLUMNS = (("status", 70, "Status"), ("find", 40, "Find"), ("align", 60, "Align"
            ("local", 58, "Local"), ("online", 66, "Online"))
 OPS = ("find", "align", "save")
 OP_MARK = {"busy": "⟳", "done": "✓", "skip": "–", "fail": "✗", "": ""}
-ALIGN_MARK = {"busy": "⟳", "done": GPU + "✓", "skip": GPU + "–", "fail": GPU + "✗", "": ""}
+ALIGN_MARK = {"busy": "⟳", "done": GPU + "✓", "partial": GPU + "≈", "skip": GPU + "–", "fail": GPU + "✗", "": ""}
 
 VIEWS = {"artist": "Artist ▸ Album", "folder": "Folders"}
 VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ Song"}
@@ -976,7 +978,7 @@ class ReviewTab(ttk.Frame):
                 poor += 1 if fv is not None and fv < thr_f else 0
                 for op in OPS:
                     v = r.get("op_" + op, "")
-                    op_done[op] += 1 if v == "done" else 0
+                    op_done[op] += 1 if v in ("done", "partial") else 0
                     op_busy[op] += 1 if v == "busy" else 0
             if not count:
                 self.tree.delete(node)
@@ -2512,8 +2514,13 @@ class ReviewTab(ttk.Frame):
         self._recompute()
         follow = "ripple around them" if self._ripple_on() else "are interpolated"
         kept = f"; kept your {len(mine)} edited time(s)" if mine else ""
-        self.v_ai_note.set(f"Aligned: {out.verify:.0f}% of words heard · {len(self.ai_keys)} of {out.lines} lines "
-                           f"placed (purple), the others {follow}{kept}.")
+        if out.partial:
+            self.v_ai_note.set(f"{GPU} Partly aligned: {out.verify:.0f}% of words heard (below your {minimum:.0f}%), so "
+                               f"only the {len(self.ai_keys)} of {out.lines} lines it was sure of were placed "
+                               f"(purple); the others {follow}{kept}. Check them.")
+        else:
+            self.v_ai_note.set(f"{GPU} Aligned: {out.verify:.0f}% of words heard · {len(self.ai_keys)} of {out.lines} "
+                               f"lines placed (purple), the others {follow}{kept}.")
 
     # ========================================================= checkpoints
     def _ov_time(self, x: float) -> float:

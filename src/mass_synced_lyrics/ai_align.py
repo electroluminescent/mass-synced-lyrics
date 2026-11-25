@@ -28,6 +28,7 @@ TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
 PACKAGES = ["stable-ts", "demucs", "julius", "av", "numpy"]
 WORD_OK = 0.5             # a word counts as clearly heard at this probability or more
 PIN_LINE = 0.6            # a line becomes a pin when its words average this probability or more
+VERIFY_FLOOR = 30.0       # below this % heard the lyrics are probably not these ones: nothing is changed
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -494,7 +495,7 @@ class SongProgress:
 # ------------------------------------------------------------------ using the alignment
 @dataclass
 class Outcome:
-    ok: bool                    # verified at or above the minimum and re-timed
+    ok: bool                    # re-timed (from the lines it was sure of; see partial)
     verify: float               # 0-100: share of the lyric's words heard clearly where they're placed
     text: str = ""              # re-timed lyrics (when ok)
     pins: int = 0               # lines placed from the audio; the rest were interpolated
@@ -507,6 +508,23 @@ class Outcome:
     heard: list = field(default_factory=list)        # [[word, start, end, probability], ...] as heard
     ends: dict = field(default_factory=dict)         # pin_key(line) -> time the line ends early (a gap follows)
     line_conf: dict = field(default_factory=dict)    # pin_key(line) -> 0-1 how surely it was heard
+    partial: bool = False       # ok, but fewer words heard than the minimum: the lines it was sure of are
+    minimum: float = 0.0        # placed, the rest interpolated; not counted as verified (left to check)
+
+
+def _too_little(base: "Outcome", verify: float, minimum: float, what: str) -> bool:
+    """Whether to give up. Below the minimum is not a reason by itself: the lines it is sure of are still
+    used and the rest interpolated (marked partial). Only too little heard to trust any of it is."""
+    base.minimum = minimum
+    if verify < min(minimum, VERIFY_FLOOR):
+        base.reason = (f"only {verify:.0f}% of the lyric's words were {what} — probably not these lyrics "
+                       f"(at least {min(minimum, VERIFY_FLOOR):.0f}% is needed to use any of it)")
+        return True
+    if base.pins < 2:
+        base.reason = "fewer than 2 lines could be placed with confidence"
+        return True
+    base.partial = verify < minimum
+    return False
 
 
 _WORD_RE = re.compile(r"\w", re.UNICODE)
@@ -679,11 +697,7 @@ def _evaluate_heard(text: str, items, result: dict, duration, minimum: float, mo
                    details={"words": n_words, "clear": n_ok, "method": "heard"}, pin_map=dict(pins),
                    heard=[list(w) for w in result.get("transcript") or []])
     base.line_conf = {k: v for k, v in conf.items()}
-    if verify < minimum:
-        base.reason = f"only {verify:.0f}% of the lyric's words were heard being sung (needs {minimum:.0f}%)"
-        return base
-    if len(pins) < 2:
-        base.reason = "fewer than 2 lines could be placed with confidence"
+    if _too_little(base, verify, minimum, "heard being sung"):
         return base
     moves = sorted(abs(v - float(k)) for k, v in pins.items())
     base.moved = round(moves[len(moves) // 2], 2)
@@ -746,11 +760,7 @@ def evaluate(text: str, result: dict, duration: float | None, minimum: float, mo
     base = Outcome(False, verify, pins=len(pins), lines=len(items), language=lang,
                    details={"words": n_words, "clear": n_ok}, pin_map=dict(pins), heard=heard_words(result),
                    line_conf=line_conf)
-    if verify < minimum:
-        base.reason = f"only {verify:.0f}% of the words were heard clearly (needs {minimum:.0f}%)"
-        return base
-    if len(pins) < 2:
-        base.reason = "fewer than 2 lines could be placed with confidence"
+    if _too_little(base, verify, minimum, "heard clearly"):
         return base
     moves = sorted(abs(v - float(k)) for k, v in pins.items())
     base.moved = round(moves[len(moves) // 2], 2)
@@ -816,18 +826,21 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
             det = st.get_aligned_detail(path) or {}
             if det.get("orig"):
                 base = det["orig"]
-                label = label.split(" · aligned (")[0]
+                label = re.split(r" · (?:partly )?aligned \(", label)[0]
         prev = None
+    if (prev is not None and not prev[1] and "(needs " in (prev[3] or "")
+            and (prev[2] or 0) >= min(minimum, VERIFY_FLOOR)):
+        prev = None        # turned down by an older version only for being under the minimum: use it now
     if prev is not None and prev[0] == h:                        # done before for these exact lyrics
         if prev[1] and prev[4]:
             st.use_aligned(path, kind, text, prev[4], label, prev[5], prev[6])
             st.commit()
             return dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
-                        reason="aligned before")
+                        reason="aligned before", partial=(prev[3] or "").startswith("partly"))
         return dict(ev, status="rejected", verify=prev[2], reason=prev[3])
     if prev is not None and prev[1] and prev[4] and lrcmod.same_lyrics(prev[4], text):
         return dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
-                    reason="already aligned")
+                    reason="already aligned", partial=(prev[3] or "").startswith("partly"))
     items = lyric_lines(base)
     if len(items) < 2:
         return dict(ev, reason="fewer than 2 timed lines")
@@ -855,14 +868,21 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
     peaks = fitmod.peaks_for(display_path(path))
     new_fit = fitmod.fit_score(out.text, dur, dur, peaks)[0]
     old_conf = st.pending_scores().get(path, (None, None))[0]
-    conf = round(max(old_conf or 0.0, out.verify), 1)
-    new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
+    if out.partial:            # not verified: its Match isn't raised, so it stays low confidence for you to check
+        conf = old_conf
+        new_label = f"{label} · partly aligned ({out.verify:.0f}% heard)"
+        note = (f"partly: {out.verify:.0f}% of words heard (below {minimum:.0f}%), so only the lines it was sure "
+                "of were placed")
+    else:
+        conf = round(max(old_conf or 0.0, out.verify), 1)
+        new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
+        note = ""
     if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit, base=base):
         return dict(ev, reason="changed or saved meanwhile")
-    st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind, orig=base, pins=out.pin_map,
+    st.set_aligned(path, h, True, out.verify, note, out.text, conf, new_fit, kind, orig=base, pins=out.pin_map,
                    heard=out.heard, mode=mode, ends=out.ends, confs=out.line_conf)
     st.commit()
-    return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit,
+    return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit, partial=out.partial,
                 reason=f"{out.pins} of {out.lines} lines placed from the audio, the rest interpolated; "
                        f"typical shift {out.moved:.2f} s")
 

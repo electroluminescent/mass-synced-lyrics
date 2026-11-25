@@ -126,7 +126,8 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 
   Interpolate and Ripple are mutually exclusive: with Ripple on, the Interpolate button shows *✓ Ripple*.
 - **Auto-align (GPU):** locates the New lyrics in this song's vocals (needs the NVIDIA add-on; see below).
-  - If enough lyric words were heard being sung (**Aligned lyrics must match**), the lines it placed get those times (purple) and the others interpolate or ripple. Times you set yourself are kept.
+  - The lines it was sure of get those times (purple) and the others interpolate or ripple. Times you set yourself are kept.
+  - If fewer lyric words were heard being sung than **Aligned lyrics must match**, it still does this but says *Partly aligned*, so check those lines.
   - Otherwise nothing changes, and a note says why.
 - **Clear pins** and **Clear edits** remove them; *Reset timing* clears everything.
 
@@ -165,18 +166,20 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 2. Whisper writes down what was actually sung or said, word by word, and also locates each lyric word.
 3. The lyrics are matched to the words heard, in order. Words that aren't in the lyrics (talk between songs, band introductions, ad-libs) are skipped, so lyrics aren't placed on them. This is what makes live recordings work.
 4. Lines that were clearly heard are placed where they were sung. The rest are interpolated between them, the same as *Interpolate*. Where the performer talks or plays without singing for a while, a gap is inserted.
-5. The result is **verified**: the share of the lyric's words heard being sung. It is kept only if it reaches **Aligned lyrics must match** (70 % by default, steps of 5 %).
+5. The result is **verified**: the share of the lyric's words heard being sung, compared with **Aligned lyrics must match** (70 % by default, steps of 5 %).
 
-**If the song passes:**
-- Its found lyrics are replaced by the re-timed version, shown as **Aligned** in the list.
+**At or above Aligned lyrics must match:**
+- Its found lyrics are replaced by the re-timed version, shown as **⚡ Aligned** (⚡✓) in the list.
 - Its Match becomes at least the verify score, and its Fit is recomputed against the audio.
 - The original timing stays available in the player as **Original timing**.
 
-**If it doesn't pass,** the song keeps its found lyrics unchanged. The activity log says why.
+**Below it:** the lines it was sure of are still placed and the rest interpolated, since that is usually far better than the found timing. The song is marked **⚡≈ partly aligned**. Its Match isn't raised, so it stays low confidence: *Apply confident* leaves it for you to check in the player.
+
+**Nothing changes** when less than 30 % of the words were heard (probably not these lyrics), or fewer than 2 lines could be placed with confidence. The activity log says why.
 
 **Progress:** the row at the top of the window shows the song number, the current step (starting the worker, loading the models, isolating the vocals, placing the lyric words, listening to what was sung, checking and saving, and so on), that step's % and the time left. Each step gets a share of the bar sized by its estimate, from the song's length and this PC's measured speed. On an RTX 3070 a 3.6-minute song takes about 26 s, plus about 9 s the first time to start the worker and load the models. The **Align** column shows the current song's progress (⟳ 42%).
 
-**Icons:** ⚡ marks everything done on the GPU: ⚡✓ re-timed, ⚡– kept as found, ⚡✗ error. ✎ marks songs whose timing you changed yourself in the player and saved. An empty Align cell means the song wasn't aligned.
+**Icons:** ⚡ marks everything done on the GPU: ⚡✓ re-timed, ⚡≈ partly aligned (check it), ⚡– kept as found, ⚡✗ error. ✎ marks songs whose timing you changed yourself in the player and saved. An empty Align cell means the song wasn't aligned.
 
 **If the aligner fails** (for example the GPU runs out of memory, the add-on is damaged, or the GPU can't be found), alignment pauses and a window explains the error. Finding carries on, and songs that need aligning keep queueing. The song that failed keeps its found lyrics. Choose:
 - **Ignore and keep aligning:** skip that song, restart the aligner, and work through the queue.

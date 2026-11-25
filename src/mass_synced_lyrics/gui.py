@@ -221,8 +221,10 @@ class App(tk.Tk):
             elif widget == "aimin":
                 sp = theme.hint(ttk.Spinbox(host, from_=50, to=100, increment=5, textvariable=self.v_ai_min, width=8,
                                             command=self._ai_min_changed),
-                                "After aligning, the re-timed lyrics are kept only if at least this % of their words "
-                                "were heard being sung; otherwise the song keeps its found lyrics unchanged. Used by Align low-confidence lyrics. Steps of 5%.")
+                                "At least this % of the lyric's words heard being sung: the alignment counts as "
+                                "verified (Match raised, Apply confident can write it). Below it, the lines it was "
+                                "sure of are still placed and the rest interpolated (⚡≈ partly aligned), left for "
+                                "you to check. Under 30% heard, or fewer than 2 lines it's sure of, nothing changes. Used by Align low-confidence lyrics. Steps of 5%.")
                 sp.grid(row=gr, column=gc + 1, sticky="w", padx=(0, 24))
                 sp.bind("<FocusOut>", lambda e: self._ai_min_changed(), add="+")
                 sp.bind("<Return>", lambda e: self._ai_min_changed(), add="+")
@@ -759,8 +761,8 @@ class App(tk.Tk):
         waiting = svc.pending() if svc is not None else 0
         if t == "align_progress":
             name = display_path(e["path"])
-            self.review.set_op(e["path"], "align", {"aligned": "done", "rejected": "skip", "error": "fail"}.get(
-                e["status"], "skip"))
+            self.review.set_op(e["path"], "align", "partial" if e.get("partial") else {
+                "aligned": "done", "rejected": "skip", "error": "fail"}.get(e["status"], "skip"))
             self.v_status.set(f"Aligning on the GPU · {svc.done if svc else 0} done"
                               + (f" · {waiting} waiting" if waiting else ""))
             if e["status"] == "aligned":
@@ -768,7 +770,12 @@ class App(tk.Tk):
                 kw = {f"conf_{kind}": e.get("confidence"), f"fit_{kind}": e.get("fit")}
                 if e["path"] in self.review.rows:
                     self.review.add_row(e["path"], "aligned", **kw)
-                self._log(f"Aligned ({e['verify']:.0f}% of words heard): {name} — {e['reason']}")
+                if e.get("partial"):
+                    self._log(f"Partly aligned ({e['verify']:.0f}% of words heard, below "
+                              f"{self.settings.ai_align_min}%): {name} — {e['reason']}. Only the lines it was sure "
+                              "of were placed; its Match isn't raised, so check it in the player.")
+                else:
+                    self._log(f"Aligned ({e['verify']:.0f}% of words heard): {name} — {e['reason']}")
                 if self.review.song is not None and self.review.song.path == e["path"]:
                     self.review.load_song(e["path"])
             elif e["status"] == "rejected":

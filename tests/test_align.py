@@ -32,8 +32,15 @@ def test_evaluate_retimes_from_clear_lines_and_verifies():
     assert times[0] == pytest.approx(2.0) and times[1] == pytest.approx(6.5)
     assert times[2] == pytest.approx(8.5)            # interpolated from the two pins (+1.5 s)
     assert out.moved == pytest.approx(1.5)
-    bad = ai_align.evaluate(LYR, res, 10.0, 70)        # needs 70%: kept as found
-    assert not bad.ok and "57%" in bad.reason and bad.text == ""
+    # below the minimum: the lines it was sure of are still used, the rest interpolated (partly aligned)
+    part = ai_align.evaluate(LYR, res, 10.0, 70)
+    assert part.ok and part.partial and part.text == out.text and part.pins == 2
+    assert not out.partial
+    # too little heard to trust any of it (probably other lyrics): nothing changes
+    few = {"ok": True, "segments": [seg(2.0, ["Other", "first"]), seg(6.5, ["Other", "second"], 0.3),
+                                    seg(8.5, ["Third", "line", "here"], 0.3)]}
+    bad = ai_align.evaluate(LYR, few, 10.0, 70)
+    assert not bad.ok and bad.verify < 30 and "probably not these lyrics" in bad.reason and bad.text == ""
     weak = ai_align.evaluate(LYR, {"ok": True, "segments": [seg(2, ["Other", "first"], 0.2),
                                                            seg(6, ["Other", "second"], 0.2),
                                                            seg(8, ["Third", "line", "here"], 0.2)]}, 10.0, 50)
@@ -511,3 +518,38 @@ def test_keep_models_loaded_hands_the_worker_to_the_next_run(settings, monkeypat
     svc2.stop()
     svc2.join(5)
     assert not held and not made[0].running()
+
+
+def test_below_the_minimum_is_partly_aligned_and_left_to_check(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    loose = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    _find(settings, [record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    st = State(settings.resolved_state_db())
+    before = st.pending_scores()[loose][0]
+    # an older version turned it down only for being under the minimum: it is aligned now
+    st.set_aligned(loose, ai_align._hash(LYR), False, 67.0, "only 67% of the words were heard clearly (needs 70%)")
+    st.commit()
+    settings.ai_align_min = 100                                  # fake worker: 3 of 3 lines, but...
+    monkeypatch.setenv("FAKE_PROB", "0.9")
+    al = ai_align.Aligner(command=fake_cmd())
+    try:
+        monkeypatch.setattr(ai_align, "evaluate", _partly(ai_align.evaluate))
+        ev = ai_align.align_one(settings, loose, al, st, 100)
+        assert ev["status"] == "aligned" and ev["partial"]
+        pend = st.get_pending(loose)
+        assert "partly aligned" in pend[1] and [t for t, _ in lrc.display_lines(pend[2])] == [2.0, 5.0, 8.0]
+        assert st.pending_scores()[loose][0] == before            # Match not raised: still left to check
+        assert st.get_aligned(loose)[3].startswith("partly")
+        again = ai_align.align_one(settings, loose, al, st, 100)  # remembered as partly aligned
+        assert again["status"] == "aligned" and again["partial"]
+    finally:
+        al.close()
+        st.close()
+
+
+def _partly(real):
+    def ev(text, result, duration, minimum, mode="slope"):
+        out = real(text, result, duration, 0, mode)
+        out.partial, out.verify = True, 67.0
+        return out
+    return ev

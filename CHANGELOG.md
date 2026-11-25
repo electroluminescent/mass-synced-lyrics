@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.1
+- **Alignment below Aligned lyrics must match is no longer thrown away.**
+  - The lines the aligner was sure of are placed and the others interpolated (or rippled), for both
+    Auto-align and aligning while finding.
+  - Such songs are marked **⚡≈ partly aligned**. Their Match isn't raised, so they stay low
+    confidence and Apply confident leaves them for you to check.
+  - At or above the minimum, nothing changes: ⚡✓, Match raised.
+  - Nothing is changed only when under 30 % of the words were heard (probably not these lyrics), or
+    fewer than 2 lines could be placed with confidence.
+  - Songs turned down by earlier versions only for being under the minimum are aligned again.
+
 ## 1.7.0
 - **Fixed: aligning failed at the very end with "Object of type float32 is not JSON serializable".**
   The word-matching scores came out as numpy numbers, and saving the per-line certainty choked on them.
