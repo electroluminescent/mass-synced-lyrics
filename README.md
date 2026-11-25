@@ -98,10 +98,10 @@ On Windows, sound is played through the default output device. Without an output
 
 The review list is saved automatically while you work and when you close the app. At the next start the app offers to **load the last session**:
 
-- **Remember my choice** skips the question next time. Change it later under *When the app starts* on the Run tab.
-- **Also restore files that were overwritten** (off by default) puts back the lyrics or `.lrc` file each song had before this app first wrote to it.
+- **Remember my choice** skips the question next time, along with your choice for the box below. Change it later under *When the app starts* on the Find lyrics tab.
+- **Also include songs that were already saved** (off by default) brings back songs whose lyrics were already written, shown as **Saved**. Their files are not changed. Otherwise only songs still waiting to be saved come back.
 
-The app keeps a copy of a file's original lyrics or `.lrc` before its first write. That copy is what *Restore* uses, from this dialog or from the right-click menu. Sidecar `.lrc` files that were moved to the Recycle Bin can be restored from the Recycle Bin.
+Before its first write to a file, the app keeps a copy of the original lyrics or `.lrc`. To put those originals back, select songs and right-click → **Restore original lyrics**. The app asks before doing it. Sidecar `.lrc` files that were moved to the Recycle Bin can be restored from the Recycle Bin.
 
 ## Where lyrics are written
 

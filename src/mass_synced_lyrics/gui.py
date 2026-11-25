@@ -496,8 +496,8 @@ class App(tk.Tk):
         if mode == "fresh":
             return
         if mode == "load":
-            self.review.load_session_rows(data)
-            self._log(f"Loaded your last session ({len(data['rows'])} songs).")
+            n = self.review.load_session_rows(data, self.settings.session_include_saved)
+            self._log(f"Loaded your last session ({n} songs).")
             return
         self._session_dialog(data)
 
@@ -516,36 +516,39 @@ class App(tk.Tk):
         ttk.Label(frm, text=f"{n} song{'s' if n != 1 else ''} from {folder}, saved {when}.",
                   wraplength=460).pack(anchor="w", pady=(4, 10))
         v_remember = tk.BooleanVar(value=False)
-        v_restore = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm, text="Remember my choice (change it later on the Run tab)",
-                        variable=v_remember).pack(anchor="w")
-        ttk.Checkbutton(frm, text="Also restore files that were overwritten (put back the lyrics / .lrc files "
-                                  "they had before this app wrote to them)", variable=v_restore).pack(anchor="w")
+        v_saved = tk.BooleanVar(value=False)
+        theme.hint(ttk.Checkbutton(frm, text="Remember my choice", variable=v_remember),
+                   "Don't ask next time. Change it later under 'When the app starts' on the Find lyrics tab.").pack(
+            anchor="w")
+        theme.hint(ttk.Checkbutton(frm, text="Also include songs that were already saved", variable=v_saved),
+                   "Bring back songs whose lyrics were already written, shown as Saved. Their files are not "
+                   "changed.").pack(anchor="w")
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(14, 0))
         self._session_dialog_win = dlg
 
         def finish(load: bool):
-            remember, restore = v_remember.get(), v_restore.get()
+            remember, include_saved = v_remember.get(), v_saved.get()
             dlg.destroy()
             self._session_dialog_win = None
             if remember:
                 self.settings.session_restore = "load" if load else "fresh"
+                self.settings.session_include_saved = include_saved
                 self.cmb_session.set(dict(SESSION_MODES)[self.settings.session_restore])
                 try:
                     save_settings(self.settings)
                 except OSError:
                     pass
             if load:
-                self.review.load_session_rows(data)
+                n = self.review.load_session_rows(data, include_saved)
+                self._log(f"Loaded your last session ({n} songs).")
                 self.nb.select(self.review)
-            if restore:
-                self.restore_paths(list(data["rows"].keys()), confirm=False)
         theme.hint(ttk.Button(btns, text="Start fresh", command=lambda: finish(False)), 'Start with an empty song list.').pack(side="right")
         theme.hint(ttk.Button(btns, text="Load session", command=lambda: finish(True),
                    style="Accent.TButton" if theme._state["sv"] else "TButton"), 'Reload the song list, choices and selection from last time.').pack(side="right", padx=6)
         dlg.protocol("WM_DELETE_WINDOW", lambda: finish(False))
         self._session_finish = finish
+        self._session_saved_var = v_saved
         dlg.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_reqwidth()) // 2
         y = self.winfo_rooty() + 120

@@ -37,6 +37,7 @@ class Settings:
     playback_volume: int = 80            # review player volume, 0–100
     review_split: int = 0                # review tab: width of the song list (0 = default)
     session_restore: str = "ask"
+    session_include_saved: bool = False  # reloading a session also lists songs already saved
     theme: str = "light"                 # light | dark         # on start: ask | load | fresh (last review session)
     log_dir: str = ""
     state_db: str = ""

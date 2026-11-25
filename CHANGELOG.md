@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2
+- Loading the last session never changes files. The option is now **Also include songs that were
+  already saved**: those songs come back listed as **Saved** (off by default = only songs still to
+  be saved). "Remember my choice" also remembers this option.
+- Restoring original lyrics is only done from the right-click menu (with confirmation).
+- "Written" is now shown as **Saved** in the song list, legend and filter.
+
 ## 1.1.1
 - Volume slider is logarithmic (decibel scale, 40 dB range): 100 % = full, 50 % ≈ −20 dB, 0 % = mute,
   so most of the slider covers the quieter, more useful range.

@@ -410,12 +410,23 @@ def test_session_multiselect_save_now_and_restore(settings, tmp_path, monkeypatc
     # session saved on close; a new window offers it
     app._on_close()
 
+    saved_lyrics = TagFile(a).read().lyrics
     app2 = new_app(settings)
     assert pump(app2, lambda: getattr(app2, "_session_dialog_win", None) is not None)
-    app2._session_finish(True)                     # "Load session"
+    app2._session_finish(True)                     # "Load session" — saved songs left out by default
+    assert set(app2.review.rows) == {kb, kc} and app2.review.rows[kc]["choice"] == "online"
+    app2.review.rows.clear()
+    app2.review._refill()
+    app2._offer_session()
+    assert pump(app2, lambda: getattr(app2, "_session_dialog_win", None) is not None)
+    app2._session_saved_var.set(True)              # "Also include songs that were already saved"
+    app2._session_finish(True)
+    app2.update()
     assert set(app2.review.rows) == {ka, kb, kc}
-    assert app2.review.rows[ka]["status"] == "embedded" and app2.review.rows[kc]["choice"] == "online"
-    # restore originals for the written song
+    assert app2.review.rows[ka]["status"] == "embedded"
+    assert app2.review.tree.item(ka, "values")[0] == "Saved"
+    assert TagFile(a).read().lyrics == saved_lyrics            # the file was NOT put back
+    # restoring originals is only the explicit right-click action
     app2.restore_paths([ka], confirm=False)
     assert pump(app2, lambda: app2.apply_worker is None)
     assert TagFile(a).read().lyrics == ["old a"] and app2.review.rows[ka]["status"] == "restored"
@@ -423,6 +434,6 @@ def test_session_multiselect_save_now_and_restore(settings, tmp_path, monkeypatc
     app2.cmb_session.set(dict(gui.SESSION_MODES)["load"])   # the Run-tab setting
     app2._on_close()
     app3 = new_app(None)
-    assert pump(app3, lambda: len(app3.review.rows) == 3)
+    assert pump(app3, lambda: len(app3.review.rows) == 3)      # restored song is no longer "saved"
     assert getattr(app3, "_session_dialog_win", None) is None
     app3._on_close()

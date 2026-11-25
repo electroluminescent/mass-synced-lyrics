@@ -22,6 +22,7 @@ FILTERS = {
     "All": None,
     "Needs attention": {"ambiguous", "not_found", "no_synced", "no_metadata", "error", "rejected", "unsupported"},
     "Found (to apply)": {"proposed", "chosen", "locked"},
+    "Saved": {"embedded", "lrc_written", "already_embedded", "unchanged"},
     "Changed": {"embedded", "lrc_written", "locked", "chosen"},
     "Per-file choices": {"locked", "chosen"},
     "Already had lyrics": {"has_synced", "already_embedded"},
@@ -39,7 +40,7 @@ ANIM = 0.2             # seconds for eased scrolling / scrubbing
 TICK_MS = 20
 
 SHORT_STATUS = {
-    "proposed": "Found", "embedded": "Written", "lrc_written": ".lrc saved", "already_embedded": "Up to date",
+    "proposed": "Found", "embedded": "Saved", "lrc_written": ".lrc saved", "already_embedded": "Up to date",
     "has_synced": "Has lyrics", "not_found": "Not found", "no_synced": "Plain only online",
     "instrumental": "Instrumental", "no_metadata": "No tags", "ambiguous": "Ambiguous", "error": "Error",
     "unsupported": "Unsupported", "locked": "Your choice", "chosen": "Your choice", "unchanged": "Unchanged",
@@ -48,6 +49,7 @@ SHORT_STATUS = {
 CHOICE_TEXT = {"local": "Local", "online": "Online", "keep": "Don't change", "custom": "Custom",
                "remove": "Remove lyrics", "": ""}
 DONE_STATUSES = {"embedded", "lrc_written", "already_embedded", "unchanged"}
+SAVED_STATUSES = {"embedded", "lrc_written"}          # this app wrote the lyrics
 PROBLEM_STATUSES = {"error", "ambiguous", "unsupported", "rejected"}
 
 
@@ -56,7 +58,7 @@ LEGEND_HINTS = {
     "c_online": "Apply will use lyrics found online (LRCLIB).",
     "c_custom": "Apply will use lyrics you chose or re-timed in the player.",
     "c_keep": "Nothing will be written for this song.",
-    "c_done": "Already written (or already had these lyrics).",
+    "c_done": "Saved: the lyrics are written (or the song already had them).",
     "c_problem": "Needs a look: error, ambiguous .lrc match, or unsupported file.",
 }
 COLUMN_HINTS = {
@@ -192,7 +194,7 @@ class ReviewTab(ttk.Frame):
         legend = ttk.Frame(left)
         legend.pack(fill="x", pady=(4, 0))
         for tag, text in (("c_local", "Local"), ("c_online", "Online"), ("c_custom", "Custom"),
-                          ("c_keep", "Don't change"), ("c_done", "Written"), ("c_problem", "Check")):
+                          ("c_keep", "Don't change"), ("c_done", "Saved"), ("c_problem", "Check")):
             pill = theme.register(tk.Label(legend, text=text), "pill", tag=tag)
             theme.hint(pill, LEGEND_HINTS[tag]).pack(side="left", padx=(0, 4))
         tf = ttk.Frame(left)
@@ -701,12 +703,15 @@ class ReviewTab(ttk.Frame):
         return {"rows": self.rows, "selected": self.tree.focus() or "", "filter": self.v_filter.get(),
                 "search": self.v_search.get()}
 
-    def load_session_rows(self, data: dict) -> None:
-        rows = data.get("rows") or {}
+    def load_session_rows(self, data: dict, include_saved: bool = False) -> int:
+        """Bring back last session's songs. Songs whose lyrics were already saved (written to the file
+        or a .lrc) are left out unless include_saved; then they're listed as Saved. Files are never
+        changed by this. Returns how many songs were loaded."""
+        rows = dict(data.get("rows") or {})
         try:
             st = State(self.app.settings.resolved_state_db())
             try:
-                for p, r in rows.items():
+                for p, r in list(rows.items()):
                     info = st.get_file_info(p)
                     if info.get("status") in ("restored", "embedded", "lrc_written"):
                         r["status"] = info["status"]          # the database knows what happened since
@@ -715,6 +720,8 @@ class ReviewTab(ttk.Frame):
                 st.close()
         except Exception:
             pass
+        if not include_saved:
+            rows = {p: r for p, r in rows.items() if r.get("status") not in SAVED_STATUSES}
         for p, r in rows.items():
             base = {"status": "", "source": "", "artist": "", "title": "", "local": "", "online": "",
                     "choice": "", "album": ""}
@@ -730,6 +737,7 @@ class ReviewTab(ttk.Frame):
             self.tree.focus(sel)
             self.tree.see(sel)
         self.app.show_apply_bar()
+        return len(rows)
 
     def cycle_group_choice(self, node: str) -> str:
         """Set every song in a group to the next of: Local → Online → Don't change (where available)."""
