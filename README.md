@@ -1,0 +1,159 @@
+# Mass Synced Lyrics
+
+Walks a music folder and adds **time-synced (LRC) lyrics** to each song. It has a desktop interface with a review player, plus a command line.
+
+The app works in three steps:
+
+1. **Find lyrics** (Run tab). The app scans the folder and finds lyrics. **Nothing is written yet.**
+2. **Review** (optional, Review & player tab). Listen, compare old and new lyrics, re-time them, and make per-file choices.
+3. **Apply** (the bar fixed to the bottom of both tabs, which appears once files are loaded). Choose the final action:
+   - **Overwrite files (embed lyrics)**, the default, writes the lyrics into each audio file's tags.
+   - **Save .lrc beside each file** writes `<song name>.lrc` next to each song and leaves the audio files untouched.
+
+Lyrics are taken from these sources, in this order:
+
+1. **A sidecar `.lrc` file in the same folder.** It is matched by file name or title, including loose matches like `Song.lrc` ↔ `03 - Artist - Song (Remastered).flac`. A sidecar **wins** even over synced lyrics already embedded in the file. After it is embedded and verified, the `.lrc` is moved to the Recycle Bin by default.
+2. **Your own LRC collection.** These are any folders or individual `.lrc` files you add. Each file is identified by its `[ar:]`/`[ti:]` headers or by an `Artist - Title.lrc` name. Collection files are never removed.
+3. **[LRCLIB](https://lrclib.net).** Lookups use title, artist, album and duration, where LRCLIB accepts a duration difference of up to ±2 s. If nothing matches, a search is scored by name similarity.
+
+Files that lack title/artist tags are identified first. The tool uses the MusicBrainz recording ID when the file has one; otherwise it uses an **AcoustID** fingerprint (made with `fpcalc`, which is bundled in the Windows build). AcoustID needs an *application* API key, which you register at acoustid.org/new-application. A personal user key is rejected.
+
+## Behaviour
+
+| Situation | Result |
+|---|---|
+| Matching sidecar `.lrc` exists | Used, replacing whatever is there. On Apply, the `.lrc` is recycled, deleted or kept, as configured. A sidecar that is already the `<song>.lrc` output is never removed. |
+| File already has synced lyrics, no sidecar | Left alone. In *.lrc* mode, synced lyrics already embedded in the file are saved out as the `.lrc`. |
+| File has plain lyrics only | Replaced if synced lyrics are found. |
+| Only plain lyrics found online | Left alone. |
+| Instrumental on LRCLIB | Left alone, and recorded so it isn't looked up again. |
+| Two or more `.lrc` files match equally well | Not applied; reported as *ambiguous*. |
+| LRC timestamps run past the end of the track | Rejected (wrong version/edit). |
+
+Other behaviour:
+
+- File **modified dates are restored** after writing (an option), so cloud sync and library scanners don't treat the files as changed.
+- Each write is **verified** by re-reading the tags before any `.lrc` is removed.
+- Progress is stored in SQLite. Stopping and re-running **resumes**: finished files are skipped, and earlier misses are not looked up again unless *Retry* is ticked. Earlier misses are still re-checked against your collection on every run.
+- Every run writes a **CSV log**: status, source, path, artist/title/album, the `.lrc` used, match score and details.
+
+## Review & player tab
+
+After **Find lyrics** finishes, the app switches here. Drag the handle between the song list and the player to resize them.
+
+**Song list:** songs are grouped **Artist ▸ Album ▸ song**, using the tags or the folder names when tags are missing.
+
+- **Status:** what happened to the song.
+- **Local:** sidecar `.lrc`, collection, or embedded lyrics (in `.lrc` mode).
+- **Online:** found, plain lyrics only, instrumental, or not found.
+- **Choice:** what Apply will do. Click a Choice cell to cycle **Local → Online → Don't change**. On an artist or album row, the click sets every song in that group.
+
+**Several songs at once:** Ctrl+click and Shift+click select several songs, and an artist or album row counts as all its songs. Clicking a Choice cell on a selected row changes them all. **Right-click** for:
+
+- **Save now:** writes just these songs immediately.
+- **Use Local / Use Online / Don't change** and **Reset to default.**
+- **Restore original lyrics:** gives files this app wrote to back the lyrics or `.lrc` they had before.
+
+Row colours show the action: local (gold), online (blue), custom (purple), don't change (grey), written (green), needs a look (red). Filter and search sit above the list; *Load earlier results* and *Open file…* add more songs.
+
+**Player:**
+
+- **Overview waveform** of the whole song, with lyric lanes for the **current** (gold) and **new** (green) lyrics. Each bar spans the time its line is shown. Word timings appear as divisions inside a bar, and the playing line lights up.
+- **Scrolling waveform** that moves past a fixed red playhead (8 s view), with line text, progress through the line, and the current word.
+- **Drag either waveform to scrub.** Seeks and scrubbing glide with a 0.2 s ease.
+- **Hovering** over a waveform shows the current and new lyric at that point.
+- **Checkpoints:**
+  - Click the overview to add one. Right-click its ▶ button, or right-click / Ctrl+click near it on the overview, to delete it. Shift+click jumps to that point.
+  - Keys **1–9** play checkpoint N; **0** plays the next one.
+  - Each plays ± the checkpoint length (default 1.0 s), then stops, or repeats if *Loop* is ticked.
+  - Defaults are the first and last lyric line. Your own checkpoints are saved per song; *Reset points* restores the defaults.
+- **Volume slider** next to the play button. **Space** plays and pauses. Number keys and Space work unless you are typing in an editable box.
+
+**Lyrics panes:** current lyrics on the left, a choice of new lyrics on the right: what Find found, sidecars, collection matches, LRCLIB (cached or *Search LRCLIB*), the current lyrics (to re-time them), the original lyrics, or *No lyrics*. The panes scroll together, keep the playing line centred, and animate smoothly. Click a line to jump to it.
+
+- Under each pane is a button: **Keep current** or **Use new**. The one Apply will use is **green with a ✓**.
+- *Reset to default* removes your choice for the song.
+
+**Timing of the new lyrics:**
+
+- **Offset** (ms) and **Stretch** (%).
+- **Stretch to song length:** scales the lyrics to this song's length, using the length of the LRCLIB version or the `[length:]` tag. If neither is known, the app asks for it.
+- **Align selected line to playhead:** one aligned line sets the offset; two set offset and stretch together.
+- **📌 Pin column:** pin a line at its current time. Pinned lines keep their time whatever else changes.
+- **Click a timestamp to edit it.** Enter saves and Esc cancels; clearing the box resets it. **Right-click a line** for *Edit time*, *Set to playhead*, *Pin/Unpin* and *Reset this timestamp*.
+- Pinned and edited times are **highlighted yellow**, with edited ones in bold.
+- **Interpolate from pins:** re-times every line you have not pinned or edited by stretching the original timing between your pins (the ends follow the nearest segment). It updates live as you add pins.
+- **Clear pins** and **Clear edited times** remove them; *Reset timing* clears everything.
+
+Pins, edits and checkpoints are saved per song.
+
+**Per-file choices** are recorded here and written by the bottom bar's **Apply**. They take precedence over the saved settings and the current run's options, and later runs keep them.
+
+On Windows, sound is played through the default output device. Without an output device, playback still runs silently so the waveform and lyrics keep moving.
+
+## Sessions and restoring
+
+The review list is saved automatically while you work and when you close the app. At the next start the app offers to **load the last session**:
+
+- **Remember my choice** skips the question next time. Change it later under *When the app starts* on the Run tab.
+- **Also restore files that were overwritten** (off by default) puts back the lyrics or `.lrc` file each song had before this app first wrote to it.
+
+The app keeps a copy of a file's original lyrics or `.lrc` before its first write. That copy is what *Restore* uses, from this dialog or from the right-click menu. Sidecar `.lrc` files that were moved to the Recycle Bin can be restored from the Recycle Bin.
+
+## Where lyrics are written
+
+| Format | Tag |
+|---|---|
+| MP3, WAV, AIFF, DSF (ID3v2) | `USLT` (keeps the file's ID3 version, 2.3 or 2.4) |
+| FLAC, Ogg Vorbis, Opus, Speex | `LYRICS` |
+| M4A / ALAC | `©lyr` |
+| WMA | `WM/Lyrics` |
+| APE, WavPack, Musepack, TAK, OptimFROG | APEv2 `Lyrics` |
+
+The LRC text, timestamps included, goes into the normal lyrics field. That is what foobar2000 (OpenLyrics), MusicBee, Poweramp, Navidrome, Jellyfin, Plex and most other players read for synced lyrics.
+
+## Using it
+
+**Windows (no install needed):**
+
+1. Unzip `MassSyncedLyrics-<version>-windows.zip` anywhere, for example to your Desktop.
+2. Double-click **`MassSyncedLyrics.exe`**.
+3. Choose your music folder and press **Find lyrics**. Nothing is changed until you press **Apply** in the bar at the bottom.
+
+The app isn't code-signed, so the first launch may show *Windows protected your PC*. Click **More info → Run anyway**. Starting it takes a few seconds because the single-file app unpacks itself first.
+
+`mass-synced-lyrics-cli.exe` is the same engine for scripts and scheduled tasks, for example `mass-synced-lyrics-cli.exe "D:\Music" --dry-run`.
+
+**From source** (Python 3.10+):
+
+```
+pip install .
+mass-synced-lyrics-gui                 # desktop interface
+mass-synced-lyrics "D:\Music" --dry-run
+```
+
+Command line options: `--output embed|lrc`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--log-dir DIR`, `--state-db FILE`.
+
+Settings, the state database and logs are stored in `%APPDATA%\mass-synced-lyrics\`.
+
+## Speed
+
+LRCLIB allows about 90 requests/minute for identified clients, and this tool uses 80 by default. Most tracks need 1–2 requests, so a 40,000-track library takes roughly 8–16 hours on the first pass. Sidecar and collection matches are instant. Stopping and resuming is safe.
+
+## Building
+
+```
+.\build.ps1          # Windows: runs tests, downloads fpcalc, builds both .exe files and the zip
+```
+
+GitHub Actions (`.github/workflows/build.yml`) does the same on every push. Pushing a tag such as `v1.0.3` publishes a Release with the zip attached. See `PUBLISHING.md` for the one-time GitHub setup. Set the repository secret **`ACOUSTID_API_KEY`** to build a default AcoustID key into the app. Locally, `python scripts/write_buildinfo.py --key YOURKEY` does the same. The key is never committed.
+
+## Limitations
+
+- An edit or remaster can have the same duration as the version on LRCLIB but a different lead-in, which leaves the lyrics offset by a few seconds. This can't be detected automatically.
+- LRCLIB lyrics are community-submitted, so their timing quality varies.
+- If the library is in a cloud folder with files-on-demand (OneDrive and similar), reading tags downloads the files.
+
+## License
+
+GPL-3.0-or-later (required by mutagen). See `LICENSE` and `THIRD_PARTY_NOTICES.md`.

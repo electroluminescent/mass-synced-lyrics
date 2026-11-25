@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b303b"/>
+      <stop offset="1" stop-color="#14161b"/>
+    </linearGradient>
+    <linearGradient id="hi" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="played"><rect x="0" y="0" width="152" height="256"/></clipPath>
+    <clipPath id="ahead"><rect x="152" y="0" width="256" height="256"/></clipPath>
+    <g id="bars">
+      <rect x="32"  y="86"  width="9" height="20"  rx="4.5"/>
+      <rect x="46"  y="74"  width="9" height="44"  rx="4.5"/>
+      <rect x="60"  y="58"  width="9" height="76"  rx="4.5"/>
+      <rect x="74"  y="44"  width="9" height="104" rx="4.5"/>
+      <rect x="88"  y="64"  width="9" height="64"  rx="4.5"/>
+      <rect x="102" y="38"  width="9" height="116" rx="4.5"/>
+      <rect x="116" y="56"  width="9" height="80"  rx="4.5"/>
+      <rect x="130" y="72"  width="9" height="48"  rx="4.5"/>
+      <rect x="144" y="48"  width="9" height="96"  rx="4.5"/>
+      <rect x="158" y="34"  width="9" height="124" rx="4.5"/>
+      <rect x="172" y="60"  width="9" height="72"  rx="4.5"/>
+      <rect x="186" y="76"  width="9" height="40"  rx="4.5"/>
+      <rect x="200" y="66"  width="9" height="60"  rx="4.5"/>
+      <rect x="214" y="84"  width="9" height="24"  rx="4.5"/>
+    </g>
+    <g id="lane1">
+      <rect x="32"  y="172" width="56" height="16" rx="8"/>
+      <rect x="96"  y="172" width="44" height="16" rx="8"/>
+      <rect x="148" y="172" width="76" height="16" rx="8"/>
+    </g>
+    <g id="lane2">
+      <rect x="32"  y="198" width="38" height="16" rx="8"/>
+      <rect x="78"  y="198" width="60" height="16" rx="8"/>
+      <rect x="146" y="198" width="48" height="16" rx="8"/>
+    </g>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#hi)"/>
+  <rect x="9" y="9" width="238" height="238" rx="53" fill="none" stroke="#454b59" stroke-width="2"/>
+
+  <use href="#bars"  fill="#6f9cf5" clip-path="url(#played)"/>
+  <use href="#bars"  fill="#3b5688" clip-path="url(#ahead)"/>
+  <use href="#lane1" fill="#ffd27a" clip-path="url(#played)"/>
+  <use href="#lane1" fill="#8a6526" clip-path="url(#ahead)"/>
+  <use href="#lane2" fill="#8ff0c0" clip-path="url(#played)"/>
+  <use href="#lane2" fill="#2c7352" clip-path="url(#ahead)"/>
+
+  <line x1="152" y1="40" x2="152" y2="226" stroke="#14161b" stroke-width="12" stroke-linecap="round" opacity="0.55"/>
+  <line x1="152" y1="40" x2="152" y2="226" stroke="#ff4d4f" stroke-width="6" stroke-linecap="round"/>
+  <path d="M139 26 H165 L152 42 Z" fill="#ff4d4f" stroke="#ff4d4f" stroke-width="4" stroke-linejoin="round"/>
+</svg>

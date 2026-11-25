@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.spec
+*.egg-info/
+.venv/
+# generated at build time; holds the AcoustID key
+src/mass_synced_lyrics/_buildinfo.py
+# ready-to-run app copied here by build.ps1 (published as a Release instead)
+/MassSyncedLyrics.exe

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b303b"/><stop offset="1" stop-color="#14161b"/>
+    </linearGradient>
+    <clipPath id="played"><rect x="0" y="0" width="19" height="32"/></clipPath>
+    <clipPath id="ahead"><rect x="19" y="0" width="32" height="32"/></clipPath>
+    <g id="bars">
+      <rect x="4"  y="10" width="2.4" height="5"  rx="1.2"/>
+      <rect x="7.6" y="6.5" width="2.4" height="12" rx="1.2"/>
+      <rect x="11.2" y="4" width="2.4" height="17" rx="1.2"/>
+      <rect x="14.8" y="7.5" width="2.4" height="10" rx="1.2"/>
+      <rect x="20.8" y="3.5" width="2.4" height="18" rx="1.2"/>
+      <rect x="24.4" y="8" width="2.4" height="9"  rx="1.2"/>
+    </g>
+    <g id="lanes">
+      <rect x="4" y="22.5" width="23" height="2.6" rx="1.3"/>
+      <rect x="4" y="26.5" width="17" height="2.6" rx="1.3"/>
+    </g>
+  </defs>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="url(#bg)"/>
+  <use href="#bars" fill="#6f9cf5" clip-path="url(#played)"/>
+  <use href="#bars" fill="#3b5688" clip-path="url(#ahead)"/>
+  <rect x="4" y="22.5" width="15" height="2.6" rx="1.3" fill="#ffd27a"/>
+  <rect x="19" y="22.5" width="8" height="2.6" rx="1.3" fill="#8a6526"/>
+  <rect x="4" y="26.5" width="15" height="2.6" rx="1.3" fill="#8ff0c0"/>
+  <rect x="19" y="26.5" width="2" height="2.6" rx="1.3" fill="#2c7352"/>
+  <rect x="18.1" y="2.5" width="1.8" height="27.5" rx="0.9" fill="#ff4d4f"/>
+</svg>
