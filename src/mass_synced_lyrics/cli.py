@@ -16,6 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--collection", action="append", default=None, metavar="PATH",
                    help="folder or .lrc file of your own lyrics to use before LRCLIB (repeatable)")
     p.add_argument("--offline", action="store_true", help="no online lookups (sidecar .lrc and collection only)")
+    p.add_argument("--lookup-synced", action="store_true",
+                   help="also look up files that already have synced lyrics embedded (skipped by default)")
     p.add_argument("--output", choices=["embed", "lrc"],
                    help="embed = overwrite the files' lyrics tags (default); lrc = save a .lrc beside each file")
     p.add_argument("--dry-run", action="store_true",
@@ -64,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.collection is not None:
         s.collection, s.use_collection = args.collection, True
     s.use_online = not args.offline
+    if args.lookup_synced:
+        s.skip_synced_online = False
     s.dry_run = args.dry_run
     if args.output:
         s.output_mode = args.output

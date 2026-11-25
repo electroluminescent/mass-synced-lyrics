@@ -67,6 +67,11 @@ class State:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
+        for col in ("orig", "pins", "heard", "mode"):   # aligned: detail for the player (1.2.2+)
+            try:
+                self.db.execute(f"ALTER TABLE aligned ADD COLUMN {col} TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
         for table in ("pending", "candidates"):         # 0-100 scores; NULL = unknown
             for col in ("confidence", "fit"):
                 try:
@@ -266,12 +271,30 @@ class State:
                                "WHERE path=?", (_k(path),)).fetchone()
 
     def set_aligned(self, path: str, src_hash: str, ok: bool, verify: float, reason: str, text: str = "",
-                    confidence: float | None = None, fit: float | None = None, kind: str = "") -> None:
+                    confidence: float | None = None, fit: float | None = None, kind: str = "",
+                    orig: str = "", pins: dict | None = None, heard: list | None = None, mode: str = "") -> None:
+        import json
         self.db.execute("REPLACE INTO aligned (path, src_hash, ok, verify, reason, text, confidence, fit, kind, "
-                        "updated) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "updated, orig, pins, heard, mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (_k(path), src_hash, 1 if ok else 0, float(verify), reason, text, _f(confidence), _f(fit),
-                         kind, time.time()))
+                         kind, time.time(), orig or "", json.dumps(pins or {}), json.dumps(heard or []), mode or ""))
         self._tick()
+
+    def get_aligned_detail(self, path: str) -> dict | None:
+        """Everything the player needs to show an alignment: the original timing, the aligner's
+        pins, the words it heard (with probabilities) and the verify score."""
+        import json
+        row = self.db.execute("SELECT ok, verify, reason, text, orig, pins, heard, mode FROM aligned WHERE path=?",
+                              (_k(path),)).fetchone()
+        if row is None:
+            return None
+        try:
+            pins = json.loads(row[5] or "{}")
+            heard = json.loads(row[6] or "[]")
+        except ValueError:
+            pins, heard = {}, []
+        return {"ok": bool(row[0]), "verify": row[1], "reason": row[2], "text": row[3] or "", "orig": row[4] or "",
+                "pins": {k: float(v) for k, v in pins.items()}, "heard": heard, "mode": row[7] or "slope"}
 
     def use_aligned(self, path: str, kind: str, old_text: str, new_text: str, label: str,
                     confidence: float | None, fit: float | None) -> bool:

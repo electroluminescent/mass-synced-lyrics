@@ -241,3 +241,33 @@ def test_rate_limit_backoff_is_shared():
     rl.defer(5.0)
     rl.wait(slept.append)
     assert slept and slept[0] > 4.5            # another thread's 429 pauses this one too
+
+
+def test_no_online_requests_for_songs_with_synced_lyrics_embedded(settings):
+    d = settings.music_folder
+    make_track(os.path.join(d, "a.flac"), "flac", lyrics=LRC_B)                    # synced, embedded
+    write_lrc(os.path.join(d, "a.lrc"), LRC)                                       # and a sidecar
+    make_track(os.path.join(d, "b.flac"), "flac", title="Other", lyrics=LRC_B)
+    settings.dry_run = True
+    lib = FakeLrclib([record(), record(title="Other")])
+    events = []
+    Engine(settings, events.append, lrclib=lib).run()
+    assert lib.calls == []                                                         # nothing sent
+    res = {os.path.basename(e["result"].path): e["result"] for e in events if e["type"] == "result"}
+    assert res["a.flac"].status == "proposed" and res["a.flac"].local == "sidecar"  # sidecar still offered
+    assert res["b.flac"].status == "has_synced"
+    # .lrc mode: the embedded lyrics are exported without asking LRCLIB
+    settings.output_mode = "lrc"
+    settings.state_db = os.path.join(os.path.dirname(settings.state_db), "s2.db")
+    lib = FakeLrclib([record(title="Other")])
+    events = []
+    Engine(settings, events.append, lrclib=lib).run()
+    assert lib.calls == []
+    res = {os.path.basename(e["result"].path): e["result"] for e in events if e["type"] == "result"}
+    assert res["b.flac"].local == "embedded" and "synced lyrics already embedded" in res["b.flac"].detail
+    # switched off: they are looked up as before
+    settings.skip_synced_online = False
+    settings.state_db = os.path.join(os.path.dirname(settings.state_db), "s3.db")
+    lib = FakeLrclib([record(title="Other")])
+    Engine(settings, lambda e: None, lrclib=lib).run()
+    assert any(c[1] == "Other" for c in lib.calls)

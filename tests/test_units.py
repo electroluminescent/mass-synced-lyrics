@@ -184,3 +184,22 @@ def test_fit_score():
     assert f < 70 and any("silence" in w for w in why)
     peaks[:] = 0.8
     assert fit_score(text, 200.0, 200.0, peaks)[0] == 100.0
+
+
+def test_ripple_retime():
+    from mass_synced_lyrics import lrc
+    t = "\n".join(f"[00:{s:02d}.00]l{i}" for i, s in enumerate([2, 10, 20, 30, 40, 50]))
+
+    def times(pins, dur):
+        out = lrc.retime(t, pins={lrc.pin_key(k): v for k, v in pins.items()}, interpolate=True, mode="ripple",
+                         duration=dur)
+        return [x for x, _ in lrc.display_lines(out)]
+    # one edit, nothing pinned around it: everything moves with it; the tail is squeezed into the song
+    assert times({20.0: 25.0}, 52) == [7.0, 15.0, 25.0, 34.0, 43.0, 52.0]
+    # between two pins the lines stretch; after the last one they move by its shift
+    assert times({10.0: 10.0, 30.0: 36.0}, 60) == [2.0, 10.0, 23.0, 36.0, 46.0, 56.0]
+    # moving earlier: the head is squeezed so nothing goes below 0
+    assert times({10.0: 5.0}, 60) == [0.0, 5.0, 15.0, 25.0, 35.0, 45.0]
+    # without ripple (slope) the ends follow the outer stretch instead
+    slope = lrc.retime(t, pins={lrc.pin_key(10.0): 10.0, lrc.pin_key(30.0): 36.0}, interpolate=True)
+    assert [x for x, _ in lrc.display_lines(slope)][-1] == 62.0

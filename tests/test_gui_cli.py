@@ -799,3 +799,141 @@ def test_align_error_popup_choices(settings, tmp_path, monkeypatch):
     assert ai_align.AlignService                              # the real one is used outside this test
     app.review.shutdown()
     app.destroy()
+
+
+def _pump(app, cond, n=600):
+    for _ in range(n):
+        app.update()
+        if cond():
+            return True
+        app.after(10)
+    return False
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    import json
+    import sys as _sys
+
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import ai_align, lrc
+    from mass_synced_lyrics.engine import Engine
+
+    lyr = "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    monkeypatch.setattr(ai_align, "is_installed", lambda: True)
+    monkeypatch.setenv("MSL_ALIGNER_CMD", json.dumps([_sys.executable,
+                                                      os.path.join(os.path.dirname(__file__), "fake_aligner.py")]))
+    d = settings.music_folder
+    p = make_track(os.path.join(d, "a.flac"), "flac")
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib([record(synced=lyr)])).run()
+    settings.ai_align = True
+    app = new_app(settings)
+    app.geometry("1300x900")
+    rv = app.review
+    app.nb.select(rv)
+    k = state_key(p)
+    rv.add_row(k, "proposed", "lrclib", "Some Artist", "Some Song", "", "found", "online")
+    rv.player.silent_reason = "test"
+    rv.tree.selection_set(k)
+    assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
+    assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0] and rv.heard() == []
+    ver = rv._lanes_ver
+    # live plot: an edit redraws the lanes at once
+    rv.set_line_time(1, 5.5)
+    assert rv._lanes_ver > ver and [round(s.start, 2) for s in rv.new_segs][1] == 5.5
+    rv._draw_scroll(0.0)
+    assert rv._scene["lanes"] == rv._lanes_ver
+    rv.set_line_time(1, None)
+    # Auto-align (GPU): fake worker hears line i at 2 + 3i with 90% certainty
+    rv.auto_align()
+    assert str(rv.btn_ai.cget("state")) == "disabled"
+    assert _pump(app, lambda: rv._align_req is None)
+    assert [t for t, _ in rv.new_lines] == [2.0, 5.0, 8.0]
+    assert rv.ai_keys == set(rv.pins) and len(rv.ai_keys) == 3
+    assert rv.txt_new.tag_ranges("ai_edited") and "Aligned: 100% of words heard" in rv.v_ai_note.get()
+    heard = rv.heard()
+    assert heard and all(w[3] == 0.9 for w in heard)
+    rv._draw_overview()
+    assert any(rv.ov.itemcget(i, "fill") == review_ui_heard(0.9) for i in rv.ov.find_all()
+               if rv.ov.type(i) == "rectangle")
+    # an edit by hand takes over that line; the aligner's other lines stay purple
+    rv.set_line_time(2, 9.0)
+    assert lrc.pin_key(7.0) not in rv.ai_keys and len(rv.ai_keys) == 2 and rv.txt_new.tag_ranges("edited")
+    # ripple: unpin everything, then one edit moves the lines around it (clamped to the song)
+    rv.clear_edits()
+    assert not rv.pins and not rv.ai_keys
+    rv.v_ripple.set(True)
+    rv._ripple_toggled()
+    assert app.settings.ripple
+    rv.set_line_time(1, 6.0)                                   # 5.0 -> 6.0: +1 s around it
+    times = [t for t, _ in rv.new_lines]
+    assert times[0] == pytest.approx(1.5) and times[1] == pytest.approx(6.0)
+    assert times[2] <= rv._duration() + 1e-6                   # squeezed into the song
+    assert rv.txt_new.tag_ranges("moved") and rv.btn_interp.cget("text").startswith("✓ Ripple")
+    rv.v_ripple.set(False)
+    rv._ripple_toggled()
+    assert [t for t, _ in rv.new_lines] == [0.5, 6.0, 7.0]     # ripple off: only the edited line moved
+    # below the minimum: shown in the lane, timings unchanged
+    rv.clear_edits()
+    monkeypatch.setenv("FAKE_PROB", "0.3")
+    app.align_service.stop()
+    app.align_service = None                                   # fresh worker reads the new env
+    rv.auto_align()
+    assert _pump(app, lambda: rv._align_req is None)
+    assert not rv.pins and "Not applied" in rv.v_ai_note.get() and rv.heard()
+    rv.shutdown()
+    app.destroy()
+
+
+def review_ui_heard(p):
+    from mass_synced_lyrics.review_ui import heard_color
+    return heard_color(p)
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_song_aligned_while_finding_opens_with_its_edits_visible(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    import sys as _sys
+
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import ai_align, lrc
+    from mass_synced_lyrics.engine import Engine
+    from mass_synced_lyrics.state import State
+
+    lyr = "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    d = settings.music_folder
+    p = make_track(os.path.join(d, "b.flac"), "flac", title="Other Tune")
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib([record(title="Other Tune (Live)", synced=lyr,
+                                                                duration=12)])).run()
+    al = ai_align.Aligner(command=[_sys.executable, os.path.join(os.path.dirname(__file__), "fake_aligner.py")])
+    ai_align.run(settings, [p], lambda e: None, aligner=al)
+    al.close()
+    st = State(settings.resolved_state_db())
+    pending = st.get_pending(p)[2]
+    st.close()
+    app = new_app(settings)
+    rv = app.review
+    app.nb.select(rv)
+    k = state_key(p)
+    rv.add_row(k, "aligned", "lrclib", "Some Artist", "Other Tune", "", "found", "online")
+    rv.player.silent_reason = "test"
+    rv.tree.selection_set(k)
+    assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
+    assert getattr(rv.cand, "ai_detail", None) is not None
+    assert lrc.same_lyrics(rv.new_text, pending)                      # exactly what Apply will write
+    assert rv.ai_keys and rv.txt_new.tag_ranges("ai_edited") and rv.heard()
+    assert rv.btn_apply.cget("text").startswith("✓")                  # still the default, no choice made
+    rv.clear_edits()                                                  # back to the original timing
+    assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0]
+    rv.shutdown()
+    app.destroy()

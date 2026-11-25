@@ -200,18 +200,66 @@ def warp(t: float, anchors: list[tuple[float, float]]) -> float:
     return t
 
 
+def ripple_warp(anchors: list[tuple[float, float]], lo: float, hi: float, duration: float | None):
+    """Map for "ripple" mode: between two anchors (original, new) times are scaled linearly; before the
+    first / after the last anchor they move by that anchor's shift, compressed if needed so nothing goes
+    below 0 or past the song's end. lo/hi: the earliest / latest original time in the lyrics."""
+    anchors = sorted(anchors)
+    o0, n0 = anchors[0]
+    ok, nk = anchors[-1]
+    end = duration if duration and duration > 0 else None
+
+    def f(t: float) -> float:
+        if t < o0:
+            d = n0 - o0
+            if lo + d < 0 and o0 > lo:                      # would start before 0: squeeze into [0, n0]
+                return max(0.0, n0 - (o0 - t) * (n0 / (o0 - lo)))
+            return max(0.0, t + d)
+        if t > ok:
+            d = nk - ok
+            if end is not None and hi + d > end and hi > ok:   # would run past the end: squeeze in
+                return min(end, nk + (t - ok) * max(0.0, end - nk) / (hi - ok))
+            return t + d if end is None else min(end, t + d)
+        for (a_o, a_n), (b_o, b_n) in zip(anchors, anchors[1:]):
+            if a_o <= t <= b_o:
+                if b_o - a_o < 1e-9:
+                    return a_n
+                return a_n + (t - a_o) * (b_n - a_n) / (b_o - a_o)
+        return t
+    return f
+
+
+def line_times(text: str) -> list[float]:
+    """Every line timestamp in the text (original order)."""
+    out = []
+    for line in (text or "").splitlines():
+        m = LINE_TS_RE.match(line)
+        if m:
+            out += [_ts_to_seconds(t) for t in TS_RE.finditer(m.group(0))]
+    return out
+
+
 def retime(text: str, offset: float = 0.0, factor: float = 1.0, pins: dict | None = None,
-           interpolate: bool = False) -> str:
+           interpolate: bool = False, mode: str = "slope", duration: float | None = None) -> str:
     """Shift and stretch every timestamp: new = old * factor + offset (seconds).
     `pins` maps an original line time (pin_key) to a fixed new time: pinned lines keep that
-    time (their word timings move with them). Times are clamped at 0; plain lyrics are unchanged."""
+    time (their word timings move with them). Times are clamped at 0; plain lyrics are unchanged.
+    With interpolate, unpinned lines follow the pins: mode "slope" extends the outer stretches
+    beyond the first/last pin, mode "ripple" moves them by the outer pins' shift and keeps them
+    within 0..duration (see ripple_warp)."""
     pins = pins or {}
     if not text or (abs(offset) < 1e-9 and abs(factor - 1.0) < 1e-9 and not pins):
         return text
     anchors = sorted((float(k), v) for k, v in pins.items())
     use_warp = interpolate and bool(anchors)
+    rip = None
+    if use_warp and mode == "ripple":
+        times = line_times(text)
+        rip = ripple_warp(anchors, min(times) if times else 0.0, max(times) if times else 0.0, duration)
 
     def base(t: float) -> float:
+        if rip is not None:
+            return rip(t)
         return warp(t, anchors) if use_warp else t * factor + offset
     out = []
     for line in text.splitlines():

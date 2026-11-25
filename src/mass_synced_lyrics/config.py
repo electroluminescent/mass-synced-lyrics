@@ -22,6 +22,7 @@ class Settings:
     collection: list[str] = field(default_factory=list)   # personal .lrc folders/files
     use_collection: bool = True
     use_online: bool = True
+    skip_synced_online: bool = True      # no LRCLIB / AcoustID requests for files with synced lyrics embedded
     dry_run: bool = False                # command line only; the app always finds first, then applies
     output_mode: str = "embed"           # embed (overwrite files) | lrc (save .lrc beside each file)
     lrc_action: str = "recycle"          # recycle | delete | keep (local sidecar .lrc after embedding)
@@ -44,6 +45,7 @@ class Settings:
     ai_align: bool = False               # align low-confidence lyrics on an NVIDIA GPU (optional add-on)
     ai_align_min: int = 70               # ... keep the re-timed lyrics only when this % of words is heard
     ai_align_model: str = "medium"       # Whisper model for the alignment
+    ripple: bool = False                 # player: an edited / aligned time moves the lines around it too
     list_view: str = "artist"            # song list: "artist" (Artist ▸ Album) or "folder" (folders on disk)
     checkpoint_seconds: float = 1.0      # review player: play ± this around a checkpoint
     loop_checkpoints: bool = False

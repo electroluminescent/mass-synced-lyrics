@@ -26,6 +26,7 @@ Files that lack title/artist tags are identified first. The tool uses the MusicB
 |---|---|
 | Matching sidecar `.lrc` exists | Used, replacing whatever is there. On Apply, the `.lrc` is recycled, deleted or kept, as configured. A sidecar that is already the `<song>.lrc` output is never removed. |
 | File already has synced lyrics, no sidecar | Left alone. In *.lrc* mode, synced lyrics already embedded in the file are saved out as the `.lrc`. |
+| File already has synced lyrics embedded | No online requests are sent for it (LRCLIB or AcoustID) while **No online requests for songs with synced lyrics embedded** is on, which is the default. A sidecar `.lrc` or your collection can still replace its lyrics. |
 | File has plain lyrics only | Replaced if synced lyrics are found. |
 | Only plain lyrics found online | Left alone. |
 | Instrumental on LRCLIB | Left alone, and recorded so it isn't looked up again. |
@@ -94,16 +95,32 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 - Under each pane is a button: **Keep current** or **Use new**. The one Apply will use is **green with a ✓**.
 - *Reset to default* removes your choice for the song.
 
-**Timing of the new lyrics:**
+**Timing of the new lyrics** (the controls under the waveforms):
 
 - **Offset** (ms) and **Stretch** (%).
 - **Stretch to song length:** scales the lyrics to this song's length, using the length of the LRCLIB version or the `[length:]` tag. If neither is known, the app asks for it.
-- **Align selected line to playhead:** one aligned line sets the offset; two set offset and stretch together.
+- **Line to playhead:** aligns the selected line to the playhead. One aligned line sets the offset; two set offset and stretch together.
 - **📌 Pin column:** pin a line at its current time. Pinned lines keep their time whatever else changes.
 - **Click a timestamp to edit it.** Enter saves and Esc cancels; clearing the box resets it. **Right-click a line** for *Edit time*, *Set to playhead*, *Pin/Unpin* and *Reset this timestamp*.
-- Pinned and edited times are **highlighted yellow**, with edited ones in bold.
-- **Interpolate from pins:** re-times every line you have not pinned or edited by stretching the original timing between your pins (the ends follow the nearest segment). It updates live as you add pins.
-- **Clear pins** and **Clear edited times** remove them; *Reset timing* clears everything.
+- **Timestamp colours:**
+  - **Yellow:** pinned and edited times (edited ones in bold).
+  - **Purple:** times set by the aligner.
+  - **Amber text:** times that moved because of interpolation or ripple.
+- **Interpolate:** re-times every line you have not pinned or edited by stretching the original timing between your pins. The ends follow the nearest stretch.
+- **Ripple changes:** when a time is edited, by you or by the aligner, the lines around it move too.
+  - Lines between two pinned or edited lines are stretched to fit.
+  - Lines before the first or after the last move by the same amount, squeezed so they stay within 0 and the song's length.
+
+  Interpolate and Ripple are mutually exclusive: with Ripple on, the Interpolate button shows *✓ Ripple*.
+- **Auto-align (GPU):** locates the New lyrics in this song's vocals (needs the NVIDIA add-on; see below).
+  - The words it heard are drawn as a **purple lane** under the New lyrics in both waveforms, brighter where it was more sure. Hover over the lane to see a word and its certainty.
+  - If enough words were heard (**Aligned lyrics must match**), the lines it placed get those times (purple) and the others interpolate or ripple. Times you set yourself are kept.
+  - Otherwise nothing changes, and the lane shows what was heard.
+- **Clear pins** and **Clear edits** remove them; *Reset timing* clears everything.
+
+The lyric lanes and the New list follow every change live, whether it comes from you or from the aligner.
+
+Songs aligned while finding open the same way: the found lyrics with the aligner's purple times on top of the original timing, plus the heard-words lane. **Clear edits** goes back to the original timing.
 
 Pins, edits and checkpoints are saved per song.
 
@@ -124,7 +141,7 @@ Off by default. Switch it on under **Scores and alignment** on the Find lyrics t
 While **Find lyrics** runs, songs whose found lyrics are below **High confidence** or **Good fit** (and have no per-file choice) are queued and aligned one at a time on the GPU. Finding carries on meanwhile, and low-confidence songs from earlier runs are added when Find finishes. For each song:
 1. Demucs isolates the vocals.
 2. Whisper locates each lyric word in them, with a probability for each.
-3. Lines whose words were heard clearly are placed where they were heard. The rest are interpolated between them, the same as *Interpolate from pins*.
+3. Lines whose words were heard clearly are placed where they were heard. The rest are interpolated between them, the same as *Interpolate*.
 4. The result is **verified**: the share of the lyric's words that were clearly heard. It is kept only if it reaches **Aligned lyrics must match** (70 % by default, steps of 5 %).
 
 **If the song passes:**
@@ -193,7 +210,7 @@ mass-synced-lyrics-gui                 # desktop interface
 mass-synced-lyrics "D:\Music" --dry-run
 ```
 
-Command line options: `--output embed|lrc`, `--trim`, `--straighten`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--workers 6`, `--log-dir DIR`, `--state-db FILE`.
+Command line options: `--output embed|lrc`, `--lookup-synced` (also look up files that already have synced lyrics embedded), `--trim`, `--straighten`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--workers 6`, `--log-dir DIR`, `--state-db FILE`.
 
 Settings, the state database and logs are stored in `%APPDATA%\mass-synced-lyrics\`.
 

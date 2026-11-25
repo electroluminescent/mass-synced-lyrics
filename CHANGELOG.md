@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.0
+- **Auto-align (GPU)** button in Review & player (uses the NVIDIA add-on; offers to switch it on). It
+  aligns the lyrics in the New pane to this song's vocals.
+- The words the aligner heard are plotted as a **purple lane** under the New lyrics, in the overview
+  and the scrolling waveform. Brightness follows the word's certainty, and hovering shows the word and
+  its %. This applies both to Auto-align and to songs aligned while finding.
+- Applying an alignment changes the timestamps as edits. Lines the aligner placed are purple, lines
+  that moved with them are amber, and times you set yourself are kept. Songs aligned while finding open
+  the same way (Clear edits returns to the original timing).
+- **Ripple changes** switch (saved). An edited or aligned time moves the lines around it: lines
+  between pins stretch to fit, and lines before the first or after the last pin move by the same amount,
+  squeezed into 0 and the song's length. Alignment while finding uses it too when it's on.
+- The lyric lanes always follow the New list live. Fixed a case where the scrolling waveform could
+  miss an edit.
+- New option **No online requests for songs with synced lyrics embedded** (on by default; `--lookup-synced`
+  on the command line turns it off). Files that already carry synced lyrics are never sent to LRCLIB or
+  AcoustID, even when a sidecar .lrc exists or in .lrc mode. Sidecars, your collection and exporting
+  embedded lyrics still work.
+- More room for the lyric panes: a slimmer scrolling waveform, one toolbar row (*Line to playhead*,
+  *Interpolate*, *Clear pins*, *Clear edits*, *Auto-align (GPU)*, *Ripple changes*), and the Fit note
+  only when something lowered the score.
+
 ## 1.2.1
 - Alignment runs alongside Find: low-confidence songs are queued as they are found and aligned on the
   GPU while finding carries on.

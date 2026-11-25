@@ -336,6 +336,9 @@ class Engine:
         dur = tf.duration or None
         existing = current_texts(tf, mode, meta.lyrics)
         has_synced = any(lrcmod.is_synced(t) for t in existing)
+        # The file already carries synced lyrics: optionally don't ask any online service about it
+        # (local sidecar / collection / embedded sources are still used).
+        no_net = bool(getattr(s, "skip_synced_online", True)) and any(lrcmod.is_synced(t) for t in meta.lyrics)
         find = s.dry_run                      # find-only (app): gather every source for the Choice column
         if find:
             state.clear_candidates(path)
@@ -366,7 +369,7 @@ class Engine:
 
         # Identity for collection / online lookups.
         ident, how = meta, ""
-        if not meta.identified:
+        if not meta.identified and not no_net:
             ident, how = self._identify(path, meta)
             if ident is None and local is None:
                 return Result(path, "no_metadata", meta=meta, duration=dur,
@@ -385,7 +388,10 @@ class Engine:
 
         # 3. LRCLIB (also when a local source exists in find mode, so both can be offered).
         found: LyricsResult | None = None
-        online_ok = s.use_online and self.lrclib is not None and online_allowed and ident is not None
+        online_ok = s.use_online and self.lrclib is not None and online_allowed and ident is not None \
+            and not no_net
+        if no_net and s.use_online:
+            note = "; ".join(x for x in (note, "online lookup skipped: synced lyrics already embedded") if x)
         if online_ok and (local is None or find):
             found = self._lookup(ident, dur, state)
             if found.status == "found":
@@ -435,7 +441,8 @@ class Engine:
             return res
         if found is None:
             status = prev[2] if (prev and not online_allowed and prev[2] != "cached") else "not_found"
-            why = "online lookup off" if not s.use_online else "earlier online miss"
+            why = "online lookup off" if not s.use_online else (
+                "synced lyrics already embedded" if no_net else "earlier online miss")
             return Result(path, status, meta=shown, duration=dur,
                           detail=(note + "; " if note else "") + why, choice="keep")
         return Result(path, found.status, "lrclib", shown, dur, detail=detail, online=online, choice="keep")

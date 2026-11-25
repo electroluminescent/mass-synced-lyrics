@@ -6,7 +6,7 @@ worker (aligner_worker.py) isolates the vocals and force-aligns the known lyric 
 
 * detects an NVIDIA GPU (nvidia-smi), installs / checks the add-on, runs the worker process;
 * turns the worker's word timings into re-timed lyrics: lines heard clearly become pins and the rest are
-  interpolated between them (the same as the player's Interpolate from pins);
+  interpolated between them (the same as the player's Interpolate);
 * scores the result ("verify", 0-100: how many of the lyric's words were clearly heard where they are
   placed). The caller keeps the result only at or above the user's minimum.
 """
@@ -276,6 +276,8 @@ class Outcome:
     language: str = ""
     moved: float = 0.0          # median shift of the pinned lines, seconds
     details: dict = field(default_factory=dict)
+    pin_map: dict = field(default_factory=dict)      # pin_key(original time) -> new time, lines the aligner placed
+    heard: list = field(default_factory=list)        # [[word, start, end, probability], ...] as heard
 
 
 _WORD_RE = re.compile(r"\w", re.UNICODE)
@@ -313,8 +315,18 @@ def map_lines(lines: list[str], segments: list[dict]) -> list[list[list]]:
     return out
 
 
-def evaluate(text: str, result: dict, duration: float | None, minimum: float) -> Outcome:
-    """Turn the worker's result into re-timed lyrics and a verify score; ok only at or above `minimum`."""
+def heard_words(result: dict) -> list:
+    """All words the aligner placed, in time order: [[word, start, end, probability], ...]."""
+    out = [list(w) for s in (result.get("segments") or []) for w in (s.get("words") or [])
+           if len(w) >= 4 and (w[2] - w[1]) >= 0.02]
+    out.sort(key=lambda w: w[1])
+    return out
+
+
+def evaluate(text: str, result: dict, duration: float | None, minimum: float, mode: str = "slope") -> Outcome:
+    """Turn the worker's result into re-timed lyrics and a verify score; ok only at or above `minimum`.
+    mode: how lines the aligner couldn't place follow the placed ones ("slope" = Interpolate,
+    "ripple" = Ripple changes)."""
     items = lyric_lines(text)
     if len(items) < 2:
         return Outcome(False, 0.0, reason="fewer than 2 timed lines")
@@ -343,7 +355,7 @@ def evaluate(text: str, result: dict, duration: float | None, minimum: float) ->
             pins[lrcmod.pin_key(orig)] = round(new, 2)
             last_new = new
     base = Outcome(False, verify, pins=len(pins), lines=len(items), language=lang,
-                   details={"words": n_words, "clear": n_ok})
+                   details={"words": n_words, "clear": n_ok}, pin_map=dict(pins), heard=heard_words(result))
     if verify < minimum:
         base.reason = f"only {verify:.0f}% of the words were heard clearly (needs {minimum:.0f}%)"
         return base
@@ -352,7 +364,7 @@ def evaluate(text: str, result: dict, duration: float | None, minimum: float) ->
         return base
     moves = sorted(abs(v - float(k)) for k, v in pins.items())
     base.moved = round(moves[len(moves) // 2], 2)
-    base.text = lrcmod.retime(text, pins=pins, interpolate=True)
+    base.text = lrcmod.retime(text, pins=pins, interpolate=True, mode=mode, duration=duration)
     base.ok = True
     return base
 
@@ -421,10 +433,12 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
     except Exception:
         dur = None
     result = al.align(path, [b for _, b in items], probe=items[0][0])       # AlignerError propagates
-    out = evaluate(text, result, dur, minimum)
+    mode = "ripple" if getattr(settings, "ripple", False) else "slope"
+    out = evaluate(text, result, dur, minimum, mode)
     if not out.ok:
         if result.get("ok"):                     # a judgement about these lyrics: remember it
-            st.set_aligned(path, h, False, out.verify, out.reason, kind=kind)
+            st.set_aligned(path, h, False, out.verify, out.reason, kind=kind, orig=text, heard=out.heard,
+                           mode=mode)
             st.commit()
             return dict(ev, status="rejected", verify=out.verify, reason=out.reason)
         return dict(ev, status="error", reason=out.reason)       # this song failed (bad file, …): retry later
@@ -435,7 +449,8 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
     new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
     if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit):
         return dict(ev, reason="changed or saved meanwhile")
-    st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind)
+    st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind, orig=text, pins=out.pin_map,
+                   heard=out.heard, mode=mode)
     st.commit()
     return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit,
                 reason=f"{out.pins} of {out.lines} lines placed from the audio, the rest interpolated; "
@@ -498,7 +513,7 @@ class AlignService:
         self._settings_fn = settings_fn
         self._emit = emit
         self._factory = aligner_factory or (lambda s: Aligner(getattr(s, "ai_align_model", "medium")))
-        self._q: "deque[tuple[str, bool]]" = deque()
+        self._q: "deque[tuple]" = deque()      # ("song", path, force) or ("raw", path, lines, probe, token)
         self._queued: set[str] = set()
         self._cv = threading.Condition()
         self.paused = False
@@ -521,12 +536,22 @@ class AlignService:
                 if k in self._queued:
                     continue
                 self._queued.add(k)
-                self._q.append((k, force))
+                self._q.append(("song", k, force))
                 n += 1
             self._cv.notify_all()
         if n:
             self._ensure_thread()
         return n
+
+    def request_raw(self, path: str, lines: list[str], probe: float, token) -> None:
+        """Align these lines for the player, ahead of the queued songs. Nothing is stored: the result
+        comes back as an align_raw event (with `token`) for the player to apply as edits."""
+        with self._cv:
+            if self.stopped:
+                return
+            self._q.appendleft(("raw", path, list(lines), float(probe or 0), token))
+            self._cv.notify_all()
+        self._ensure_thread()
 
     def pending(self) -> int:
         with self._cv:
@@ -588,10 +613,31 @@ class AlignService:
                         self._cv.wait(1.0)
                     if self.stopped:
                         return
-                    path, force = self._q.popleft()
-                    self._queued.discard(path)
+                    item = self._q.popleft()
                     self.busy = True
+                    if item[0] == "song":
+                        self._queued.discard(item[1])
                 s = self._settings_fn()
+                if item[0] == "raw":
+                    _, path, lines, probe, token = item
+                    try:
+                        if nvidia_gpu() is None:
+                            raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
+                        if self._aligner is None:
+                            self._aligner = self._factory(s)
+                        result = self._aligner.align(path, lines, probe=probe)
+                    except Exception as e:
+                        msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
+                        self._emit({"type": "align_raw", "token": token, "path": path,
+                                    "result": {"ok": False, "error": msg}})
+                        if self._aligner is not None:
+                            self._aligner.close()
+                            self._aligner = None
+                        self._pause(msg, path)
+                        continue
+                    self._emit({"type": "align_raw", "token": token, "path": path, "result": result})
+                    continue
+                _, path, force = item
                 if st is None:
                     st = State(s.resolved_state_db())
                 if not force:

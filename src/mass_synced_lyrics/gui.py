@@ -135,8 +135,14 @@ class App(tk.Tk):
         self.v_retry = tk.BooleanVar()
         sw = "Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
         r = 1
+        self.v_skip_synced = tk.BooleanVar()
         for text, var, tip in (("Look up missing lyrics online (LRCLIB)", self.v_online,
                                  "Search LRCLIB, a free community lyrics database, for songs without local lyrics."),
+                                ("No online requests for songs with synced lyrics embedded", self.v_skip_synced,
+                                 "Files that already carry time-synced lyrics are never sent to LRCLIB or AcoustID. "
+                                 "A sidecar .lrc or your collection can still replace them, and in .lrc mode their "
+                                 "embedded lyrics are still exported. Turn off to also look them up online, so "
+                                 "Review can compare them with LRCLIB."),
                                 ("Identify untagged files with AcoustID", self.v_acoustid,
                                  "Fingerprint files that have no title/artist tags to find out what they are.")):
             theme.hint(ttk.Checkbutton(opt, text=text, variable=var, style=sw), tip).grid(
@@ -328,6 +334,7 @@ class App(tk.Tk):
         for p in s.collection:
             self.lst_collection.insert("end", p)
         self.v_online.set(s.use_online)
+        self.v_skip_synced.set(bool(s.skip_synced_online))
         self.v_acoustid.set(s.use_acoustid)
         self.v_key.set(s.acoustid_key)
         self.cmb_action.set(dict(LRC_ACTIONS).get(s.lrc_action, LRC_ACTIONS[0][1]))
@@ -351,6 +358,7 @@ class App(tk.Tk):
         s.use_collection = self.v_use_collection.get()
         s.collection = list(self.lst_collection.get(0, "end"))
         s.use_online = self.v_online.get()
+        s.skip_synced_online = bool(self.v_skip_synced.get())
         s.use_acoustid = self.v_acoustid.get()
         s.acoustid_key = self.v_key.get().strip()
         label = self.cmb_action.get()
@@ -1100,6 +1108,8 @@ class App(tk.Tk):
         elif t == "scan":
             self.progress.stop()
             self.progress.config(mode="determinate", maximum=max(1, e["total"]), value=0)
+        elif t == "align_raw":
+            self.review.align_result(e)
         elif t in ("align_progress", "align_error", "align_idle"):
             self._align_event(e)
         elif t == "ai_installed":
