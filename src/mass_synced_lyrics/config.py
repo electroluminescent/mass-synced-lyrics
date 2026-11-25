@@ -6,6 +6,7 @@ import os
 from dataclasses import asdict, dataclass, field, fields
 
 from . import APP_NAME, DEFAULT_ACOUSTID_KEY
+from .jsonutil import plain as _plain
 
 
 def app_dir() -> str:
@@ -45,6 +46,7 @@ class Settings:
     ai_align: bool = False               # align low-confidence lyrics on an NVIDIA GPU (optional add-on)
     ai_align_min: int = 70               # ... keep the re-timed lyrics only when this % of words is heard
     ai_align_model: str = "medium"       # Whisper model for the alignment
+    ai_keep_loaded: bool = True          # keep the GPU worker and its models loaded between songs and runs
     ripple: bool = False
     show_current: bool = False           # player: show the Current lyrics pane (collapsed by default)                 # player: an edited / aligned time moves the lines around it too
     list_view: str = "artist"
@@ -108,5 +110,5 @@ def save_settings(s: Settings, path: str | None = None) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(asdict(s), fh, indent=2)
+        json.dump(asdict(s), fh, indent=2, default=_plain)
     os.replace(tmp, path)

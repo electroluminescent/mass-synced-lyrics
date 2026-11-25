@@ -401,7 +401,7 @@ def learn_timings(times: dict, duration: float | None) -> None:
         os.makedirs(addon_dir(), exist_ok=True)
         tmp = _timings_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({k: list(v) for k, v in costs.items()}, f)
+            json.dump({k: [float(x) for x in v] for k, v in costs.items()}, f)
         os.replace(tmp, _timings_path())
     except OSError:
         pass
@@ -583,7 +583,8 @@ def match_transcript(lines: list[str], transcript: list) -> list[list[tuple]]:
     out: list[list[tuple]] = [[] for _ in lines]
     if not lw or not tw:
         return out
-    sim = cdist([t for _, _, t in lw], [t for t, _, _, _ in tw], scorer=fuzz.ratio)
+    # plain Python floats: numpy's float32 would end up in the stored per-line certainty (JSON)
+    sim = cdist([t for _, _, t in lw], [t for t, _, _, _ in tw], scorer=fuzz.ratio).tolist()
     n, m = len(lw), len(tw)
     SKIP_T, SKIP_L, MISS = -0.15, -0.6, -1.0
     neg = -1e9
@@ -615,7 +616,7 @@ def match_transcript(lines: list[str], transcript: list) -> list[list[tuple]]:
             if s >= MATCH_SIM:
                 li, pos, _ = lw[i - 1]
                 t = tw[j - 1]
-                out[li].append((pos, t[1], t[2], t[3], s / 100.0))
+                out[li].append((pos, float(t[1]), float(t[2]), float(t[3]), float(s) / 100.0))
             i, j = i - 1, j - 1
         elif how == 2:
             i -= 1
@@ -927,9 +928,12 @@ class AlignService:
 
     PER_SONG_ERRORS_BEFORE_PAUSE = 3
 
-    def __init__(self, settings_fn, emit, aligner_factory=None):
+    def __init__(self, settings_fn, emit, aligner_factory=None, handoff=None):
+        """handoff(aligner): when the service ends with a healthy worker and Keep models loaded is on,
+        the worker is handed over (the app keeps it for the next service) instead of being shut down."""
         from collections import deque
         self._settings_fn = settings_fn
+        self._handoff = handoff
         self._emit = emit
         self._factory = aligner_factory or (lambda s: Aligner(getattr(s, "ai_align_model", "medium")))
         self._q: "deque[tuple]" = deque()      # ("song", path, force) or ("raw", path, lines, probe, token)
@@ -1035,7 +1039,7 @@ class AlignService:
                             self.busy = False
                             idle_since = time.monotonic()
                             self._emit({"type": "align_idle", "counts": dict(self.counts), "done": self.done})
-                        if (self._aligner is not None and not self.paused
+                        if (self._aligner is not None and not self.paused and not self._keep()
                                 and time.monotonic() - idle_since > self.IDLE_RELEASE):
                             self._aligner.close()
                             self._aligner = None
@@ -1106,12 +1110,31 @@ class AlignService:
                         st = None
                     self._pause(f"Unexpected error while aligning: {type(e).__name__}: {e}", item[1])
         finally:
-            if self._aligner is not None:
-                self._aligner.close()
-                self._aligner = None
+            al, self._aligner = self._aligner, None
+            if al is not None:
+                if self._handoff is not None and self._keep() and al.running() and not self.paused:
+                    try:
+                        self._handoff(al)
+                    except Exception:
+                        al.close()
+                else:
+                    al.close()
             if st is not None:
                 st.close()
             self.busy = False
+
+    def _keep(self) -> bool:
+        try:
+            return bool(getattr(self._settings_fn(), "ai_keep_loaded", True))
+        except Exception:
+            return False
+
+    def release_idle(self) -> None:
+        """Keep models loaded was switched off: let the worker go now if nothing is being aligned."""
+        with self._cv:
+            if not self.busy and not self._q and self._aligner is not None:
+                self._aligner.close()
+                self._aligner = None
 
     def _progress(self, path: str, duration, kind: str) -> SongProgress:
         al = self._aligner

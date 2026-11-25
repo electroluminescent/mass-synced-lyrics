@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.7.0
+- **Fixed: aligning failed at the very end with "Object of type float32 is not JSON serializable".**
+  The word-matching scores came out as numpy numbers, and saving the per-line certainty choked on them.
+  They are now plain numbers, and every save (results, player edits, session, settings) accepts numpy
+  numbers too.
+- **⚡ Keep the GPU models loaded** (Find lyrics tab, under Scores and alignment; on by default). The
+  aligner and its models stay in GPU memory between songs and runs, including after Stop, so aligning
+  and Auto-align start at once instead of spending about 9 s starting up. Switched off, they're
+  released after 2 minutes without work.
+- **Fixed: clicking away from a timestamp being edited didn't close the editor.** The click that
+  opened it left the keyboard focus on the lyric list, so the editor never noticed the focus leave.
+  Clicking anywhere else now saves and closes it, as does clicking another timestamp. Esc still
+  cancels. The volume % editor works the same way.
+- **Fixed: songs never aligned on the GPU looked aligned.**
+  - In the Edited lane, lines that only moved along with your edits (offset, stretch, interpolate,
+    ripple) were drawn purple, the aligner's colour. They are now slate blue; purple only ever means
+    the GPU placed the line. Hovering says how each line got its time: ⚡ placed by the GPU aligner
+    (with its certainty), ✎ your time, or moved along.
+  - ✎ in the Align column appeared for any song with a custom choice. It now appears only when you
+    saved timing you changed yourself.
+
 ## 1.6.0
 - **Step-by-step GPU progress:** the progress row says what the GPU is doing for the current song
   (starting the worker, loading the vocal and speech models, reading the audio, isolating the vocals,

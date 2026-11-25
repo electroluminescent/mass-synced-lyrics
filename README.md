@@ -114,7 +114,7 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 - **Stretch to song length:** scales the lyrics to this song's length, using the length of the LRCLIB version or the `[length:]` tag. If neither is known, the app asks for it.
 - **Line to playhead:** aligns the selected line to the playhead. One aligned line sets the offset; two set offset and stretch together.
 - **📌 Pin column:** pin a line at its current time. Pinned lines keep their time whatever else changes.
-- **Click a timestamp to edit it.** Enter saves and Esc cancels; clearing the box resets it. **Right-click a line** for *Edit time*, *Set to playhead*, *Pin/Unpin* and *Reset this timestamp*.
+- **Click a timestamp to edit it.** Enter or clicking anywhere else saves, and Esc cancels; clearing the box resets it. **Right-click a line** for *Edit time*, *Set to playhead*, *Pin/Unpin* and *Reset this timestamp*.
 - **Timestamp colours:**
   - **Yellow:** pinned and edited times (edited ones in bold).
   - **Purple:** times set by the aligner.
@@ -131,8 +131,8 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 - **Clear pins** and **Clear edits** remove them; *Reset timing* clears everything.
 
 **Lanes under the waveforms:** *Current*, *Found* (the lyrics as found) and *Edited*. The Edited lane appears whenever the timing has been changed, by you or by the aligner, and stays when you come back to the song.
-- Lines placed by the aligner are purple, brighter where they were heard more surely. Times you set are yellow.
-- Hover over a lyric to see its found and edited times and the aligner's certainty.
+- Lines placed by the GPU aligner are purple, brighter where they were heard more surely. Times you set are yellow. Lines that only moved along (offset, stretch, interpolate, ripple) are slate blue.
+- Hover over a lyric to see its found and edited times and how it got its time: ⚡ placed by the GPU aligner (with its certainty), ✎ your time, or moved along.
 
 **Resize a lyric** by dragging either edge in the scrolling waveform (the cursor changes on an edge):
 - **Start:** moves only that lyric.
@@ -154,6 +154,7 @@ On Windows, sound is played through the default output device. Without an output
 ## Align low-confidence lyrics (NVIDIA GPU, optional)
 
 Off by default. Switch it on under **Scores and alignment** on the Find lyrics tab.
+- **⚡ Keep the GPU models loaded** (on by default): the aligner and its models stay in GPU memory (about 3 GB) between songs and runs, so aligning starts at once. Switched off, they're released after 2 minutes without work.
 - **Requirements:** an NVIDIA graphics card with its driver installed. Without one, the option can't be switched on.
 - **First use:** the app offers to install a one-time add-on into `%LOCALAPPDATA%\mass-synced-lyrics\aligner`. It needs Python 3.10–3.12 from python.org.
   - The add-on is PyTorch with CUDA, Whisper (via stable-ts) and Demucs, about 3 GB.
@@ -175,7 +176,7 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 
 **Progress:** the row at the top of the window shows the song number, the current step (starting the worker, loading the models, isolating the vocals, placing the lyric words, listening to what was sung, checking and saving, and so on), that step's % and the time left. Each step gets a share of the bar sized by its estimate, from the song's length and this PC's measured speed. On an RTX 3070 a 3.6-minute song takes about 26 s, plus about 9 s the first time to start the worker and load the models. The **Align** column shows the current song's progress (⟳ 42%).
 
-**Icons:** ⚡ marks everything done on the GPU: ⚡✓ re-timed, ⚡– kept as found, ⚡✗ error. ✎ marks lyrics or timing you set yourself in the player.
+**Icons:** ⚡ marks everything done on the GPU: ⚡✓ re-timed, ⚡– kept as found, ⚡✗ error. ✎ marks songs whose timing you changed yourself in the player and saved. An empty Align cell means the song wasn't aligned.
 
 **If the aligner fails** (for example the GPU runs out of memory, the add-on is damaged, or the GPU can't be found), alignment pauses and a window explains the error. Finding carries on, and songs that need aligning keep queueing. The song that failed keeps its found lyrics. Choose:
 - **Ignore and keep aligning:** skip that song, restart the aligner, and work through the queue.

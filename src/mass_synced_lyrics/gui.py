@@ -131,6 +131,9 @@ class App(tk.Tk):
         self.v_fit = tk.IntVar()
         self.v_fit_audio = tk.BooleanVar()
         self.v_ai = tk.BooleanVar()
+        self.v_ai_keep = tk.BooleanVar(value=True)
+        self._held_aligner = None
+        self._held_lock = threading.Lock()
         self.v_ai_min = tk.IntVar()
         self.v_only_found = tk.BooleanVar()
         self.v_retry = tk.BooleanVar()
@@ -173,12 +176,17 @@ class App(tk.Tk):
                  "While finding, decode each song with found lyrics to see whether lines start on silence or run "
                  "into the silence at the end; this sharpens the Fit score. Songs opened in the player are always "
                  "checked.", None),
-                ("Align low-confidence lyrics (NVIDIA GPU)", self.v_ai,
+                (GPU + " Align low-confidence lyrics (NVIDIA GPU)", self.v_ai,
                  "After Find, re-time the found lyrics that are below High confidence or Good fit: the vocals are "
                  "isolated (Demucs) and the lyric words are located in them (Whisper). Lines heard clearly are "
                  "placed, the rest interpolated, and the result is kept only if it reaches Aligned lyrics must "
                  "match. Needs an NVIDIA graphics card and a one-time add-on download of about 3 GB. Off by "
-                 "default.", self._ai_toggled))):
+                 "default.", self._ai_toggled),
+                (GPU + " Keep the GPU models loaded", self.v_ai_keep,
+                 "Keep the aligner and its speech and vocal models in GPU memory (about 3 GB) between songs and "
+                 "runs, so aligning and Auto-align start at once instead of spending about 9 s starting up. "
+                 "Off: they're released after 2 minutes without work. On by default.",
+                 self._keep_loaded_toggled))):
             theme.hint(ttk.Checkbutton(lib, text=text, variable=var, style=sw, command=cmd), tip).grid(
                 row=11 + i, column=0, columnspan=2, sticky="w", pady=(6 if i == 0 else 2, 0))
         for label, widget in (("After using a sidecar .lrc", "action"), ("Match confidence (70–100)", "thr"),
@@ -214,8 +222,7 @@ class App(tk.Tk):
                 sp = theme.hint(ttk.Spinbox(host, from_=50, to=100, increment=5, textvariable=self.v_ai_min, width=8,
                                             command=self._ai_min_changed),
                                 "After aligning, the re-timed lyrics are kept only if at least this % of their words "
-                                "were clearly heard where they are placed; otherwise the song keeps its found lyrics "
-                                "unchanged. Used by Align low-confidence lyrics. Steps of 5%.")
+                                "were heard being sung; otherwise the song keeps its found lyrics unchanged. Used by Align low-confidence lyrics. Steps of 5%.")
                 sp.grid(row=gr, column=gc + 1, sticky="w", padx=(0, 24))
                 sp.bind("<FocusOut>", lambda e: self._ai_min_changed(), add="+")
                 sp.bind("<Return>", lambda e: self._ai_min_changed(), add="+")
@@ -349,6 +356,7 @@ class App(tk.Tk):
         self.v_confident.set(snap5(s.confident_threshold, 50, 100))
         self.v_fit.set(snap5(s.confident_fit, 0, 100))
         self.v_ai.set(bool(s.ai_align))
+        self.v_ai_keep.set(bool(getattr(s, "ai_keep_loaded", True)))
         self.v_ai_min.set(snap5(s.ai_align_min, 50, 100))
         self.v_fit_audio.set(bool(s.fit_audio))
         self.v_only_found.set(bool(s.only_found))
@@ -377,6 +385,7 @@ class App(tk.Tk):
         s.confident_fit = self._fit_value()
         s.fit_audio = bool(self.v_fit_audio.get())
         s.ai_align = bool(self.v_ai.get())
+        s.ai_keep_loaded = bool(self.v_ai_keep.get())
         s.ai_align_min = self._ai_min_value()
         s.only_found = bool(self.v_only_found.get())
         s.output_mode = self.v_output.get()
@@ -683,8 +692,48 @@ class App(tk.Tk):
 
         svc = getattr(self, "align_service", None)
         if svc is None and create:
-            svc = self.align_service = ai_align.AlignService(lambda: self.settings, self.events.put)
+            svc = self.align_service = ai_align.AlignService(lambda: self.settings, self.events.put,
+                                                             self._take_aligner, handoff=self._hold_aligner)
         return svc
+
+    # Keep models loaded: the GPU worker outlives a stopped run, so the next one starts without loading.
+    def _take_aligner(self, s):
+        from . import ai_align
+
+        with self._held_lock:
+            al, self._held_aligner = self._held_aligner, None
+        if al is not None and al.running() and al.model == getattr(s, "ai_align_model", "medium"):
+            return al
+        if al is not None:
+            al.close()
+        return ai_align.Aligner(getattr(s, "ai_align_model", "medium"))
+
+    def _hold_aligner(self, al) -> None:
+        with self._held_lock:
+            old, self._held_aligner = self._held_aligner, al
+        if old is not None and old is not al:
+            old.close()
+
+    def _release_held_aligner(self) -> None:
+        with self._held_lock:
+            al, self._held_aligner = self._held_aligner, None
+        if al is not None:
+            al.close()
+
+    def _keep_loaded_toggled(self) -> None:
+        self.settings.ai_keep_loaded = bool(self.v_ai_keep.get())
+        try:
+            save_settings(self._collect_settings())
+        except OSError:
+            pass
+        if not self.settings.ai_keep_loaded:
+            self._release_held_aligner()
+            svc = self._align_service(create=False)
+            if svc is not None:
+                svc.release_idle()
+            self._log("Align: GPU models are released after 2 minutes without work.")
+        else:
+            self._log("Align: GPU models stay loaded between songs and runs.")
 
     def queue_alignment(self, paths, force: bool = False) -> int:
         """Queue songs for the GPU aligner (runs alongside Find). force=True: whatever their scores."""
@@ -1067,6 +1116,7 @@ class App(tk.Tk):
         if svc is not None:
             svc.stop()
             svc.join(timeout=10)
+        self._release_held_aligner()
         self.review.shutdown()
         self.save_session_now()
         try:

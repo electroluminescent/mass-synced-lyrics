@@ -449,3 +449,65 @@ def test_songs_with_your_own_choice_say_why_they_are_skipped(settings, monkeypat
     st.close()
     al.close()
     assert ev["status"] == "skipped" and "your own choice" in ev["reason"]
+
+
+def test_heard_alignment_is_stored_and_saved_as_plain_json(settings, monkeypatch, tmp_path):
+    # the transcript matcher's similarity scores came from numpy (float32): storing the per-line
+    # certainty failed with "Object of type float32 is not JSON serializable" right at the end
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setenv("FAKE_TRANSCRIPT", "1")
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    _find(settings, [record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    st = State(settings.resolved_state_db())
+    al = ai_align.Aligner(command=fake_cmd())
+    try:
+        ev = ai_align.align_one(settings, p, al, st, 70, force=True)
+        assert ev["status"] == "aligned", ev
+        det = st.get_aligned_detail(p)
+        assert det["confs"] and all(type(v) is float for v in det["confs"].values())
+        st.set_song_prefs(p, {"ai_conf": det["confs"]})
+    finally:
+        al.close()
+        st.close()
+    m = ai_align.match_transcript(["a b"], [[" a", 1.0, 1.2, 0.9], [" b", 1.3, 1.5, 0.9]])
+    assert all(type(x) is float for w in m[0] for x in w[1:])
+
+
+def test_keep_models_loaded_hands_the_worker_to_the_next_run(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    _find(settings, [record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    assert settings.ai_keep_loaded                                  # on by default
+    held, made = [], []
+
+    def factory(s):
+        if held:
+            return held.pop()
+        made.append(ai_align.Aligner(command=fake_cmd()))
+        return made[-1]
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, factory, handoff=held.append)
+    svc.IDLE_RELEASE = 0.0                                          # would release at once if not kept
+    svc.submit([p], force=True)
+    assert _wait(lambda: any(e.get("status") == "aligned" for e in events) and svc.idle())
+    import time
+    time.sleep(1.5)
+    assert svc._aligner is not None and svc._aligner.running()      # kept while idle
+    svc.stop()
+    svc.join(5)
+    assert len(held) == 1 and held[0].running() and held[0].loaded   # handed over, still loaded
+    # the next run takes it: no start-up, no model loading
+    events.clear()
+    svc2 = ai_align.AlignService(lambda: settings, events.append, factory, handoff=held.append)
+    svc2.IDLE_RELEASE = 0.0
+    svc2.submit([p], force=True)
+    assert _wait(lambda: svc2.current is not None or any(e.get("type") == "align_progress" for e in events))
+    assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
+    assert len(made) == 1
+    # switched off: the idle worker is let go
+    settings.ai_keep_loaded = False
+    assert _wait(lambda: svc2._aligner is None)
+    svc2.stop()
+    svc2.join(5)
+    assert not held and not made[0].running()

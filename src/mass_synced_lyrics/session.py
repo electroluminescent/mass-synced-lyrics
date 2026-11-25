@@ -6,6 +6,7 @@ import os
 import time
 
 from .config import app_dir
+from .jsonutil import plain as _plain
 
 VERSION = 1
 
@@ -23,7 +24,7 @@ def save_session(rows: dict, selected: str = "", filter_name: str = "", search: 
                  "filter": filter_name, "search": search, "rows": rows})
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False)
+        json.dump(data, fh, ensure_ascii=False, default=_plain)
     os.replace(tmp, path)
 
 

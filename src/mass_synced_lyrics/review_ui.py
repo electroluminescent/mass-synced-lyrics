@@ -81,7 +81,8 @@ COLUMN_HINTS = {
           "Click the header to filter by it.",
     "find": "Find lyrics: ⟳ being looked up now · ✓ done · ✗ error.",
     "align": "Alignment. ⚡ = on the GPU: ⟳ 42% aligning now · ⚡✓ re-timed · ⚡– heard too little, kept as found · "
-             "⚡✗ error. ✎ = timing or lyrics you set yourself in the player.",
+             "⚡✗ error. ✎ = timing you set yourself in the player (offset, stretch, pins or edited times). "
+             "Empty = not aligned.",
     "save": "Saving (Apply / Save now): ⟳ writing now · ✓ written · – already up to date · ✗ error.",
 }
 COLUMNS = (("status", 70, "Status"), ("find", 40, "Find"), ("align", 60, "Align"), ("save", 40, "Save"),
@@ -95,7 +96,7 @@ VIEWS = {"artist": "Artist ▸ Album", "folder": "Folders"}
 VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ Song"}
 
 ROW_KEYS = ("status", "source", "artist", "title", "local", "online", "choice", "album", "conf_local",
-            "conf_online", "fit_local", "fit_online", "op_find", "op_align", "op_save")
+            "conf_online", "fit_local", "fit_online", "op_find", "op_align", "op_save", "hand")
 SCORE_COLS = {"match": ("Match", "list_min_match"), "fit": ("Fit", "list_min_fit")}
 FOUND_STATUSES = {"proposed", "chosen", "locked", "aligned"}
 
@@ -105,7 +106,8 @@ OV_EDIT_Y, OV_RULER_Y = 76, 88           # overview: edited-lyrics lane (10 px),
 SC_CUR_Y, SC_NEW_Y = 76, 95              # scrolling waveform: Current / found lyrics lanes (17 px each)
 SC_EDIT_Y, SC_RULER_Y = 114, 133         # scrolling waveform: edited-lyrics lane (17 px), ruler
 SC_LANE_Y = {"cur": SC_CUR_Y, "new": SC_NEW_Y, "edit": SC_EDIT_Y}
-EDIT_A, EDIT_B, EDIT_ON = "#6f5596", "#7f66a8", "#cdb5f0"   # edited lane: lines that moved with others
+EDIT_A, EDIT_B, EDIT_ON = "#4d6a88", "#5a7896", "#a9c4e2"   # edited lane: lines that only moved along
+# (slate blue, not purple: purple means the GPU placed the line, so songs never aligned don't look aligned)
 EDIT_USER = "#e2bd55"                    # edited lane: times you set (yellow, like the list)
 EDGE_PX = 6                              # how close to a lyric's edge a press resizes it
 HEARD_LO, HEARD_HI = "#3d2a55", "#d58cff"   # heard words: low → high confidence
@@ -288,7 +290,9 @@ class Tooltip:
 
 
 def _blank_row() -> dict:
-    return {k: (None if k.startswith(("conf_", "fit_")) else "") for k in ROW_KEYS}
+    row = {k: (None if k.startswith(("conf_", "fit_")) else "") for k in ROW_KEYS}
+    row["hand"] = False                       # re-timed by you in the player (✎ in the Align column)
+    return row
 
 
 def _busy(r: dict) -> bool:
@@ -496,7 +500,7 @@ class ReviewTab(ttk.Frame):
         self.v_volume_txt = tk.StringVar(value=f"{int(self.v_volume.get())}%")
         self.lbl_volume = ttk.Label(tr, textvariable=self.v_volume_txt, width=5, cursor="xterm")
         self.lbl_volume.pack(side="left", padx=(4, 0))
-        self.lbl_volume.bind("<Button-1>", lambda e: self._edit_volume())
+        self.lbl_volume.bind("<Button-1>", lambda e: self._edit_volume(e))
         self.sld_volume.bind("<ButtonRelease-1>", lambda e: self._save_globals())
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.sld_volume.bind(seq, self._volume_wheel)
@@ -1021,10 +1025,10 @@ class ReviewTab(ttk.Frame):
         st = r.get("op_align", "")
         vals["align"] = (f"⟳ {r['align_pct']:.0f}%" if st == "busy" and r.get("align_pct") is not None
                          else ALIGN_MARK.get(st, ""))
-        if r.get("choice") == "custom":
-            vals["align"] += HAND
-        elif not st and r.get("status") == "aligned":
+        if not st and r.get("status") == "aligned":
             vals["align"] = ALIGN_MARK["done"]
+        if r.get("hand") and r.get("choice") == "custom":
+            vals["align"] += HAND                 # you re-timed it yourself in the player
         return tuple(vals[c] for c, _, _ in COLUMNS)
 
     def set_align_pct(self, path: str, pct: float | None) -> None:
@@ -1526,6 +1530,8 @@ class ReviewTab(ttk.Frame):
             for p in songs:
                 review.clear_choice(p, s)
                 choice = st.current_choice(p)
+                if p in self.rows:
+                    self.rows[p]["hand"] = False
                 prev = self.row_status_before_choice.pop(p, None)
                 cur = self.rows.get(p, {}).get("status", "")
                 self.add_row(p, prev if prev is not None else ("proposed" if cur in ("chosen", "locked") and
@@ -1754,6 +1760,9 @@ class ReviewTab(ttk.Frame):
                 if e.get("status"):
                     st = self.rows.get(e["path"], {}).get("status", "")
                     choice = e.get("choice")
+                    row = self.rows.get(state_key(e["path"]))
+                    if row is not None:
+                        row["hand"] = bool(e.get("hand")) and e["status"] == "chosen"
                     if e["status"] == "cleared":
                         self.add_row(e["path"], self.row_status_before_choice.pop(e["path"], st), choice=choice)
                     else:
@@ -2072,6 +2081,7 @@ class ReviewTab(ttk.Frame):
         if which == "new" and "ts" in w.tag_names(at) and self.orig_lines:
             self.sel_line = idx
             self._edit_time(idx)
+            self._editor_serial = getattr(e, "serial", None)     # this click opened it: don't close it
             return
         if which == "new":
             self.sel_line = idx
@@ -2179,7 +2189,11 @@ class ReviewTab(ttk.Frame):
         self._recompute()
 
     def _edit_time(self, idx: int) -> None:
-        """Inline editor over the timestamp: Enter saves, Esc cancels, empty + Enter resets."""
+        """Inline editor over the timestamp: Enter or clicking anywhere else saves, Esc cancels, empty +
+        Enter resets."""
+        prev = getattr(self, "_editor_commit", None)
+        if getattr(self, "_editor", None) is not None and prev is not None:
+            prev()                                # another timestamp clicked: keep what was typed in this one
         self._close_editor()
         if not (0 <= idx < len(self.new_lines)) or self.new_lines[idx][0] is None:
             return
@@ -2198,7 +2212,8 @@ class ReviewTab(ttk.Frame):
         ent.select_range(0, "end")
         ent.place(x=x, y=y - 1, height=h + 4)
         ent.focus_set()
-        self._editor = ent
+        self.after_idle(lambda: ent.winfo_exists() and self._editor is ent and ent.focus_set())   # the click's
+        self._editor = ent                                                     # own handling moves focus away
 
         def commit(_e=None):
             if self._editor is not ent:      # already closed (Esc, or committed once)
@@ -2217,10 +2232,34 @@ class ReviewTab(ttk.Frame):
         ent.bind("<KP_Enter>", commit)
         ent.bind("<Escape>", lambda e: self._close_editor())
         ent.bind("<FocusOut>", commit)          # clicking elsewhere keeps what was typed
+        self._editor_commit = commit
+        self._editor_serial = None
+        self._watch_clicks()
+
+    def _watch_clicks(self) -> None:
+        """Clicks on things that don't take the keyboard focus (the lyric list, the waveforms, empty space)
+        don't end an inline editor by themselves: watch every click while one is open."""
+        if getattr(self, "_clicks_watched", False):
+            return
+        self._clicks_watched = True
+        self.bind_all("<ButtonPress>", self._click_away, add="+")
+
+    def _click_away(self, e) -> None:
+        ed = getattr(self, "_editor", None)
+        if ed is not None and e.widget is not ed and getattr(e, "serial", None) != self._editor_serial:
+            commit = getattr(self, "_editor_commit", None)
+            if commit is not None:
+                commit()
+        vol = getattr(self, "_vol_editor", None)
+        if vol is not None and e.widget is not vol and getattr(e, "serial", None) != getattr(self, "_vol_serial", None):
+            close = getattr(self, "_vol_close", None)
+            if close is not None:
+                close(True)
 
     def _close_editor(self) -> None:
         ed = getattr(self, "_editor", None)
         self._editor = None
+        self._editor_commit = None
         if ed is not None:
             try:
                 ed.destroy()
@@ -2302,8 +2341,8 @@ class ReviewTab(ttk.Frame):
         return self.new_segs if self.has_edits() else []
 
     def _edit_colours(self) -> list[str]:
-        """Edited lane: aligner-placed lines shaded by how surely they were heard, your own times
-        yellow, lines that only moved along in purple."""
+        """Edited lane: GPU-placed lines purple, shaded by how surely they were heard; your own times
+        yellow; lines that only moved along (offset, stretch, interpolate, ripple) slate blue."""
         out = []
         for i, sg in enumerate(self.new_segs):
             key = self._line_key(i) if i < len(self.orig_lines) else None
@@ -2746,7 +2785,7 @@ class ReviewTab(ttk.Frame):
         self.set_volume(round(self.v_volume.get()) + (2 if up else -2))
         return "break"
 
-    def _edit_volume(self) -> None:
+    def _edit_volume(self, e=None) -> None:
         """Click the % to type a level: Enter/clicking away saves, Esc cancels."""
         if getattr(self, "_vol_editor", None) is not None:
             return
@@ -2774,6 +2813,9 @@ class ReviewTab(ttk.Frame):
         ent.bind("<KP_Enter>", lambda e: close(True))
         ent.bind("<Escape>", lambda e: close(False))
         ent.bind("<FocusOut>", lambda e: close(True))
+        self._vol_close = close
+        self._vol_serial = getattr(e, "serial", None)
+        self._watch_clicks()
 
     def _volume_changed(self, _value=None) -> None:
         v = max(0.0, min(100.0, float(self.v_volume.get())))
@@ -3033,8 +3075,13 @@ class ReviewTab(ttk.Frame):
         if self.has_edits():
             i = lrcmod.segment_at(self.new_segs, t)
             key = self._line_key(i) if 0 <= i < len(self.orig_lines) else None
-            if key in self.ai_conf:
-                parts.append(f"Aligner: {self.ai_conf[key] * 100:.0f}% sure it heard this line")
+            if key in self.ai_keys:
+                sure = f", {self.ai_conf[key] * 100:.0f}% sure it heard this line" if key in self.ai_conf else ""
+                parts.append(f"{GPU} Placed by the GPU aligner{sure}")
+            elif key in self.edited:
+                parts.append(f"{HAND} Your time")
+            elif i >= 0:
+                parts.append("Moved along with the edited lines")
         if e.widget is self.sc:
             edge = self._edge_at(e.x, e.y)
             self.sc.configure(cursor="sb_h_double_arrow" if edge else "")
@@ -3235,7 +3282,10 @@ class ReviewTab(ttk.Frame):
             label += f" (offset {self.offset * 1000:+.0f} ms, stretch {self.factor * 100:.2f}%"
             label += (f", interpolated from {len(self.pins)} pins)" if self.interpolate
                       else f", {len(self.pins)} pinned)" if self.pins else ")")
-        self._run_action(lambda s: review.choose(self.song.path, text, label, s, c.path), "chosen")
+        mine = bool(self.edited - self.ai_keys) or bool(set(self.end_marks) - self.ai_ends) or \
+            abs(self.offset) > 1e-6 or abs(self.factor - 1) > 1e-9
+        self._run_action(lambda s: review.choose(self.song.path, text, label, s, c.path), "chosen",
+                         hand=bool(c.synced and mine))
 
     def _lock(self) -> None:
         if self.song is not None:
@@ -3245,7 +3295,7 @@ class ReviewTab(ttk.Frame):
         if self.song is not None:
             self._run_action(lambda s: review.clear_choice(self.song.path, s), "cleared")
 
-    def _run_action(self, fn, status) -> None:
+    def _run_action(self, fn, status, hand: bool = False) -> None:
         path, s = self.song.path, self.app.settings
 
         def work():
@@ -3257,7 +3307,7 @@ class ReviewTab(ttk.Frame):
                 finally:
                     st.close()
                 self.app.events.put({"type": "review_done", "path": path, "status": status,
-                                     "msg": msg or "", "choice": choice})
+                                     "msg": msg or "", "choice": choice, "hand": hand})
             except Exception as e:
                 self.app.events.put({"type": "review_done", "path": path,
                                      "err": f"{type(e).__name__}: {e}"})

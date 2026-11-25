@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 
+from .jsonutil import dumps as _dumps
 from .paths import state_key as _k
 
 FINAL = {"embedded", "already_embedded", "has_synced", "instrumental", "no_synced", "not_found",
@@ -114,7 +115,7 @@ class State:
 
     def set_lookup(self, key: str, status: str, payload: dict) -> None:
         self.db.execute("REPLACE INTO lookups VALUES (?,?,?,?)",
-                        (key, status, json.dumps(payload), time.time()))
+                        (key, status, _dumps(payload), time.time()))
         self._tick()
 
     # -- backups of lyrics that were replaced (first original only)
@@ -215,7 +216,7 @@ class State:
 
     def set_song_prefs(self, path: str, prefs: dict) -> None:
         path = _k(path)
-        self.db.execute("REPLACE INTO song_prefs VALUES (?,?,?)", (path, json.dumps(prefs), time.time()))
+        self.db.execute("REPLACE INTO song_prefs VALUES (?,?,?)", (path, _dumps(prefs), time.time()))
         self.commit()
 
     def delete_file(self, path: str) -> None:
@@ -274,12 +275,11 @@ class State:
                     confidence: float | None = None, fit: float | None = None, kind: str = "",
                     orig: str = "", pins: dict | None = None, heard: list | None = None, mode: str = "",
                     ends: dict | None = None, confs: dict | None = None) -> None:
-        import json
         self.db.execute("REPLACE INTO aligned (path, src_hash, ok, verify, reason, text, confidence, fit, kind, "
                         "updated, orig, pins, heard, mode, ends, confs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (_k(path), src_hash, 1 if ok else 0, float(verify), reason, text, _f(confidence), _f(fit),
-                         kind, time.time(), orig or "", json.dumps(pins or {}), json.dumps(heard or []), mode or "",
-                         json.dumps(ends or {}), json.dumps(confs or {})))
+                         kind, time.time(), orig or "", _dumps(pins or {}), _dumps(heard or []), mode or "",
+                         _dumps(ends or {}), _dumps(confs or {})))
         self._tick()
 
     def get_aligned_detail(self, path: str) -> dict | None:

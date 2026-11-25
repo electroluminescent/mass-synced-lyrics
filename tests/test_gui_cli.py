@@ -326,6 +326,25 @@ def test_review_table_groups_choices_pins_and_scrub(settings, tmp_path, monkeypa
     assert rv.factor == pytest.approx(rv._duration() / 5.0)
     rv._reset_timing()
 
+    # inline editor opened by a real click; clicking somewhere that doesn't take focus (the waveform)
+    # saves and closes it (it used to stay open)
+    w = rv.txt_new
+    rng = w.tag_nextrange("ts", "2.0", "2.end")
+    w.see(rng[0])
+    app.update()
+    x, y, _, h = w.bbox(rng[0])
+    w.event_generate("<Button-1>", x=x + 3, y=y + h // 2)
+    for _ in range(5):
+        app.update()
+    assert rv._editor is not None and rv._editor.winfo_exists()       # the opening click keeps it open
+    rv._editor.delete(0, "end")
+    rv._editor.insert(0, "0:05.25")
+    assert str(app.tk.call("focus", "-lastfor", app)) == str(rv._editor)   # typing goes into it
+    rv.event_generate("<ButtonPress-1>", x=2, y=2)                    # empty space: takes no focus
+    app.update()
+    assert rv._editor is None and [t for t, _ in rv.new_lines][1] == pytest.approx(5.25)
+    rv._reset_timing()
+
     # inline editor: empty input resets
     rv.set_line_time(1, 6.0)
     rv._edit_time(1)
@@ -891,7 +910,9 @@ def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, m
     rv.clear_edits()
     monkeypatch.setenv("FAKE_PROB", "0.3")
     app.align_service.stop()
-    app.align_service = None                                   # fresh worker reads the new env
+    app.align_service.join(10)
+    app.align_service = None
+    app._release_held_aligner()                                # fresh worker reads the new env
     rv.auto_align()
     assert _pump(app, lambda: rv._align_req is None)
     assert not rv.pins and "Not applied" in rv.v_ai_note.get() and not rv.has_edits()
@@ -1123,6 +1144,17 @@ def test_player_resize_end_marks_and_edited_lane(settings, tmp_path, monkeypatch
     rv._resize = None
     assert [round(t, 2) for t, _ in rv.new_lines] == [0.5, 3.0, 5.0, 7.0] and rv.new_lines[1][1] == ""
     assert rv.has_edits() and rv.edited_segs()                     # the Edited lane is shown
+    from mass_synced_lyrics.review_ui import EDIT_A, EDIT_B, EDIT_USER, heard_color
+    # never aligned on the GPU: nothing in the Edited lane looks like the aligner's purple
+    assert set(rv._edit_colours()) <= {EDIT_A, EDIT_B, EDIT_USER}
+    assert heard_color(0.9) not in rv._edit_colours() and not rv.ai_keys
+    # the Align column stays empty for it; ✎ only once you save your own timing
+    rv.rows[k]["choice"] = "custom"
+    rv._upsert(k)
+    assert rv.tree.set(k, "align") == ""
+    rv.rows[k]["hand"] = True
+    rv._upsert(k)
+    assert rv.tree.set(k, "align") == "✎"
     # the gap row can be moved like a lyric, and cleared
     rv.set_line_time(1, 4.0)
     assert [round(t, 2) for t, _ in rv.new_lines][:3] == [0.5, 4.0, 5.0]
