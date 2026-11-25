@@ -360,7 +360,21 @@ class ReviewTab(ttk.Frame):
         self._ov_drag: dict | None = None
         self._sc_drag: dict | None = None
         self._build()
+        self._no_click_focus(self)
         self.after(TICK_MS, self._tick)
+
+    @staticmethod
+    def _no_click_focus(w) -> None:
+        """Buttons and switches here don't keep the keyboard focus when clicked: Space and the number
+        keys belong to the player (Space used to press the last-clicked button again, e.g. Auto-align)."""
+        for child in w.winfo_children():
+            if isinstance(child, (ttk.Button, ttk.Checkbutton, ttk.Radiobutton, ttk.Menubutton,
+                                  tk.Button, tk.Checkbutton)):
+                try:
+                    child.configure(takefocus=0)
+                except tk.TclError:
+                    pass
+            ReviewTab._no_click_focus(child)
 
     # ================================================================ layout
     def _build(self) -> None:
@@ -458,20 +472,29 @@ class ReviewTab(ttk.Frame):
         bf.pack(fill="x")
         theme.hint(ttk.Button(bf, text="Load earlier results", command=self.load_earlier), 'Add every song from earlier runs to the list.').pack(side="left")
         theme.hint(ttk.Button(bf, text="Open file…", command=self._open_file), 'Open any song in the player.').pack(side="left", padx=6)
-        mb = ttk.Menubutton(bf, text=GPU + " Align (GPU)")
+        cb = ttk.Menubutton(bf, text="Columns")
+        cb.bind("<Button-1>", lambda e: cb.configure(menu=self._columns_menu()), add="+")
+        cb.configure(menu=self._columns_menu())
+        theme.hint(cb, "Show or hide columns (also: right-click a column header).").pack(side="left")
+        bf2 = ttk.Frame(left)
+        bf2.pack(fill="x", pady=(6, 0))
+        mb = ttk.Menubutton(bf2, text=GPU + " Align (GPU)")
         menu = theme.register(tk.Menu(mb, tearoff=0), "menu")
         menu.add_command(label=GPU + " Align low-confidence songs in the list",
                          command=lambda: self.app.align_command("low"))
         menu.add_command(label=GPU + " Align selected songs", command=lambda: self.app.align_command("selected"))
         mb["menu"] = menu
         theme.hint(mb, "Align lyrics to the vocals on the NVIDIA GPU: the low-confidence songs in this list, or the "
-                       "selected songs. Progress shows at the top of the window.").pack(side="left")
-        cb = ttk.Menubutton(bf, text="Columns")
-        cb.bind("<Button-1>", lambda e: cb.configure(menu=self._columns_menu()), add="+")
-        cb.configure(menu=self._columns_menu())
-        theme.hint(cb, "Show or hide columns (also: right-click a column header).").pack(side="left", padx=6)
+                       "selected songs. Songs already aligned are skipped. Progress shows at the top of the "
+                       "window.").pack(side="left")
+        theme.hint(ttk.Button(bf2, text="Clear cached data",
+                              command=lambda: self.app.clear_cache_command() if hasattr(self.app, "clear_cache_command")
+                              else None),
+                   "Forget what was worked out for the selected songs (online lookup, what the GPU heard, Find's "
+                   "record) so the next Find / Align does them again. A GPU alignment is undone. Your choices, "
+                   "edits and backups stay; no files are changed. Also: right-click.").pack(side="left", padx=6)
         self.v_count = tk.StringVar(value="0 files")
-        ttk.Label(bf, textvariable=self.v_count).pack(side="right")
+        ttk.Label(bf2, textvariable=self.v_count).pack(side="right")
 
         # ---- right: player
         right = ttk.Frame(paned, padding=(6, 0, 0, 0))
@@ -1499,6 +1522,8 @@ class ReviewTab(ttk.Frame):
         if hasattr(self.app, "align_command"):
             m.add_command(label=f"{GPU} Align on the GPU ({what})",
                           command=lambda: self.app.align_command("songs", songs))
+        if hasattr(self.app, "clear_cache_command"):
+            m.add_command(label=f"Clear cached data ({what})…", command=lambda: self.app.clear_cache_command(songs))
         m.add_separator()
         m.add_command(label=f"Restore original lyrics ({what})…", command=lambda: self.app.restore_paths(songs))
         m.add_separator()
@@ -1904,6 +1929,7 @@ class ReviewTab(ttk.Frame):
         self._show_fit_note()
         self.anchors = []
         self.sel_line = None
+        ad = getattr(self.cand, "ai_detail", None)
         if restore and restore.get("cand") == self.cand.key:
             self.pins = {k: float(v) for k, v in (restore.get("pins") or {}).items()}
             self.edited = set(restore.get("edited") or [])
@@ -1914,22 +1940,46 @@ class ReviewTab(ttk.Frame):
             self.ai_ends = set(restore.get("ai_ends") or []) & set(self.end_marks)
             self.ai_conf = {k: float(v) for k, v in (restore.get("ai_conf") or {}).items()}
             self._set_timing(restore.get("offset", 0.0), restore.get("factor", 1.0))
+            if ad and restore.get("ai_stamp") != ad.get("stamp"):
+                # aligned (again) on the GPU since you last had this song open: show that alignment,
+                # keeping the times you set yourself
+                self._overlay_ai(ad)
         else:
             self.pins, self.edited, self.interpolate = {}, set(), False
             self.ai_keys, self.warp_mode = set(), "slope"
             self.end_marks, self.ai_ends, self.ai_conf = {}, set(), {}
-            ad = getattr(self.cand, "ai_detail", None)
             if ad:                     # aligned while finding: show it as the aligner's edits on the original
-                self.pins = dict(ad["pins"])
-                self.edited = set(ad["pins"])
-                self.ai_keys = set(ad["pins"])
-                self.interpolate = bool(self.pins) and ad.get("mode") != "fixed"
-                self.warp_mode = ad.get("mode") if ad.get("mode") in ("slope", "ripple") else "slope"
-                self.end_marks = dict(ad.get("ends") or {})
-                self.ai_ends = set(self.end_marks)
-                self.ai_conf = dict(ad.get("confs") or {})
+                self._overlay_ai(ad)
             self._set_timing(0.0, 1.0)
         self._recompute()
+
+    def _overlay_ai(self, ad: dict) -> None:
+        """Put a stored GPU alignment on the current timing: its pins (purple), gaps and certainty.
+        Times you set yourself stay."""
+        mine = self.edited - self.ai_keys
+        for k in list(self.ai_keys):
+            if k not in mine:
+                self.pins.pop(k, None)
+                self.edited.discard(k)
+        self.ai_keys = set()
+        for k, v in (ad.get("pins") or {}).items():
+            if k in mine:
+                continue
+            self.pins[k] = float(v)
+            self.edited.add(k)
+            self.ai_keys.add(k)
+        for k in list(self.ai_ends):
+            self.end_marks.pop(k, None)
+        self.ai_ends = set()
+        for k, v in (ad.get("ends") or {}).items():
+            if k not in self.end_marks:
+                self.end_marks[k] = float(v)
+                self.ai_ends.add(k)
+        self.ai_conf = dict(ad.get("confs") or {})
+        self.interpolate = bool(self.pins) and ad.get("mode") != "fixed"
+        if ad.get("mode") in ("slope", "ripple"):
+            self.warp_mode = ad["mode"]
+        self._ai_stamp = ad.get("stamp")
 
     def _set_timing(self, offset: float, factor: float) -> None:
         self._suspend_trace = True
@@ -2399,6 +2449,8 @@ class ReviewTab(ttk.Frame):
             orig = o.text
             det = dict(det, **_diff_as_edits(orig, det["text"]))
             det["orig"] = orig
+        import hashlib
+        det["stamp"] = hashlib.sha1((det["text"] or "").encode("utf-8", "replace")).hexdigest()[:16]
         for c in self.cands:
             if c.text and lrcmod.same_lyrics(c.text, det["text"]):
                 c.text = orig                      # same result, shown as edits on the original timing
@@ -2428,6 +2480,7 @@ class ReviewTab(ttk.Frame):
         else:
             self.v_ai_note.set("Starting…")
         self._ai_button()
+        self._grab_keys()
         app.activity.set("autoalign", GPU + " Auto-align", None,
                          detail=os.path.basename(display_path(self.song.path)), stop=self.cancel_auto_align)
         svc.request_raw(self.song.path, [b for _, b in items], items[0][0], self._align_req,
@@ -2843,6 +2896,9 @@ class ReviewTab(ttk.Frame):
                  "ai": sorted(self.ai_keys & set(self.pins)), "mode": self.warp_mode,
                  "ends": dict(self.end_marks), "ai_ends": sorted(self.ai_ends & set(self.end_marks)),
                  "ai_conf": dict(self.ai_conf)}
+        ad = getattr(self.cand, "ai_detail", None) if self.cand else None
+        if ad and ad.get("stamp"):
+            prefs["ai_stamp"] = ad["stamp"]        # this alignment has been shown (and maybe adjusted)
         if self.cp_custom:
             prefs["checkpoints"] = self.checkpoints
         if prefs != (self.song.prefs or {}):

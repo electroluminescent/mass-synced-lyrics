@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.0
+- **Fixed: the purple GPU timings didn't show for songs aligned in a batch** if you had opened the song
+  in the player before. The player restored your earlier view instead. It now puts the GPU's alignment
+  on top and keeps the times you set yourself. This also fixes songs aligned before this version.
+- **Fixed: Space pressed Auto-align again** after it finished. Buttons and switches in Review & player
+  no longer keep the keyboard focus when clicked, so Space always plays and pauses.
+- **Nothing is worked out twice:**
+  - A song already aligned on the GPU is skipped, also from the right-click menu ("Skipped (already
+    aligned on the GPU)").
+  - What the GPU heard is cached per song and set of lyric lines while the audio file is unchanged.
+    Aligning the same lyrics again (batch, right-click or Auto-align) reuses it without the GPU and
+    judges it against the current settings.
+  - Find already skipped songs it handled and reused online lookups.
+- **Clear cached data** (button under the song list, and on the right-click menu) for the selected
+  songs: forgets their online lookup, what the GPU heard and Find's record, and undoes their GPU
+  alignment (back to the found timing). Your choices, edits and the backups of original lyrics are
+  kept, and no files are changed.
+- **Ignore cached results** (Find lyrics tab, off by default): works everything out again: songs Find
+  handled, online lookups and GPU results (aligned again from the found timing).
+- The ⚡ Align (GPU) button moved to a second row under the list, beside Clear cached data.
+
 ## 1.7.1
 - **Alignment below Aligned lyrics must match is no longer thrown away.**
   - The lines the aligner was sure of are placed and the others interpolated (or rippled), for both

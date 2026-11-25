@@ -46,6 +46,7 @@ class Settings:
     ai_align: bool = False               # align low-confidence lyrics on an NVIDIA GPU (optional add-on)
     ai_align_min: int = 70               # ... keep the re-timed lyrics only when this % of words is heard
     ai_align_model: str = "medium"       # Whisper model for the alignment
+    ignore_cache: bool = False           # look everything up / align again instead of reusing earlier results
     ai_keep_loaded: bool = True          # keep the GPU worker and its models loaded between songs and runs
     ripple: bool = False
     show_current: bool = False           # player: show the Current lyrics pane (collapsed by default)                 # player: an edited / aligned time moves the lines around it too

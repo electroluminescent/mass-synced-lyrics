@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 
@@ -59,6 +60,11 @@ class State:
                 confidence REAL, fit REAL, kind TEXT, updated REAL);
             CREATE TABLE IF NOT EXISTS song_prefs (
                 path TEXT PRIMARY KEY, prefs TEXT, updated REAL);
+            CREATE TABLE IF NOT EXISTS align_cache (
+                path TEXT, lines TEXT, model TEXT, sig TEXT, result TEXT, updated REAL,
+                PRIMARY KEY (path, lines, model));
+            CREATE TABLE IF NOT EXISTS file_lookups (
+                path TEXT PRIMARY KEY, key TEXT);
             """
         )
         for table, col in (("pending", "lrc_path"), ("overrides", "lrc_path"),
@@ -300,6 +306,67 @@ class State:
         return {"ok": bool(row[0]), "verify": row[1], "reason": row[2], "text": row[3] or "", "orig": row[4] or "",
                 "pins": {k: float(v) for k, v in pins.items()}, "heard": heard, "mode": row[7] or "slope",
                 "ends": {k: float(v) for k, v in ends.items()}, "confs": {k: float(v) for k, v in confs.items()}}
+
+    # -- what the GPU worker heard, per song and lyric lines: aligning the same lines again needs no GPU
+    def get_align_cache(self, path: str, lines: str, model: str, sig: str) -> dict | None:
+        row = self.db.execute("SELECT sig, result FROM align_cache WHERE path=? AND lines=? AND model=?",
+                              (_k(path), lines, model)).fetchone()
+        if row is None or row[0] != sig:                  # the file changed since: not valid
+            return None
+        try:
+            return json.loads(row[1])
+        except ValueError:
+            return None
+
+    def set_align_cache(self, path: str, lines: str, model: str, sig: str, result: dict) -> None:
+        self.db.execute("REPLACE INTO align_cache VALUES (?,?,?,?,?,?)",
+                        (_k(path), lines, model, sig, _dumps(result), time.time()))
+        self._tick()
+
+    def set_file_lookup(self, path: str, key: str) -> None:
+        self.db.execute("REPLACE INTO file_lookups VALUES (?,?)", (_k(path), key))
+        self._tick()
+
+    def clear_cache(self, path: str) -> list[str]:
+        """Forget what was worked out for this song so the next Find / Align does it again: its online
+        lookup, the GPU results, and that Find already handled it. A GPU alignment is undone (the found
+        lyrics go back to their original timing). Your choices, edits and backups of originals stay.
+        Returns what was cleared."""
+        from .lrc import same_lyrics
+        path = _k(path)
+        done = []
+        row = self.db.execute("SELECT key FROM file_lookups WHERE path=?", (path,)).fetchone()
+        if row:
+            self.db.execute("DELETE FROM lookups WHERE key=?", (row[0],))
+            self.db.execute("DELETE FROM file_lookups WHERE path=?", (path,))
+            done.append("online lookup")
+        if self.db.execute("DELETE FROM align_cache WHERE path=?", (path,)).rowcount:
+            done.append("GPU results")
+        al = self.db.execute("SELECT ok, text, orig, kind FROM aligned WHERE path=?", (path,)).fetchone()
+        if al is not None:
+            ok, text, orig, kind = al
+            pend = self.get_pending(path)
+            if ok and orig and pend is not None and same_lyrics(pend[2], text or ""):
+                cands = self.get_candidates(path)
+                scores = self.candidate_scores(path)
+                o = cands.get((kind or "online") + "-original")
+                conf, fit = scores.get((kind or "online") + "-original", (None, None))
+                label = re.split(r" · (?:partly )?aligned \(", pend[1] or "")[0]
+                if o is not None and same_lyrics(o[1], orig):
+                    self.set_candidate(path, kind or "online", o[0], o[1], o[2], o[3], conf, fit)
+                    self.db.execute("DELETE FROM candidates WHERE path=? AND kind=?",
+                                    (path, (kind or "online") + "-original"))
+                self.db.execute("UPDATE pending SET text=?, label=?, confidence=?, fit=?, updated=? WHERE path=?",
+                                (orig, label, _f(conf), _f(fit), time.time(), path))
+                done.append("GPU alignment (back to the found timing)")
+            self.db.execute("DELETE FROM aligned WHERE path=?", (path,))
+            if "GPU results" not in done:
+                done.append("GPU results")
+        if self.db.execute("UPDATE files SET size=-1 WHERE path=?", (path,)).rowcount:
+            done.append("Find's record")
+        self._tick()
+        self.commit()
+        return done
 
     def use_aligned(self, path: str, kind: str, old_text: str, new_text: str, label: str,
                     confidence: float | None, fit: float | None, base: str | None = None) -> bool:

@@ -413,7 +413,7 @@ def test_service_retries_a_crashed_worker_and_force_realigns_from_the_original(s
     assert _wait(lambda: any(e.get("status") == "aligned" for e in events))
     assert os.path.exists(tmp_path / "crashed") and not svc.paused            # crashed once, retried, fine
     assert not any(e["type"] == "align_error" for e in events) and svc.current is None
-    # asked again for this song (right-click): it is aligned again from the original timing, not skipped
+    # asked again for this song (right-click): already aligned on the GPU, so skipped (no GPU work)
     monkeypatch.setenv("FAKE_START", "3.0")
     svc._aligner.close()
     svc._aligner = None                                       # fresh worker reads the new env
@@ -421,7 +421,15 @@ def test_service_retries_a_crashed_worker_and_force_realigns_from_the_original(s
     svc.submit([p], force=True)
     assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
     ev = next(e for e in events if e.get("type") == "align_progress")
-    assert ev["status"] == "aligned" and ev["reason"] not in ("aligned before", "already aligned")
+    assert ev["status"] == "aligned" and ev["reason"].startswith("already aligned") and svc._aligner is None
+    # with Ignore cached results it is aligned again, from the original timing
+    settings.ignore_cache = True
+    events.clear()
+    svc.submit([p], force=True)
+    assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
+    ev = next(e for e in events if e.get("type") == "align_progress")
+    assert ev["status"] == "aligned" and not ev["reason"].startswith("already") and not ev["cached"]
+    settings.ignore_cache = False
     st = State(settings.resolved_state_db())
     try:
         assert [t for t, _ in lrc.display_lines(st.get_pending(p)[2])] == [3.0, 6.0, 9.0]
@@ -508,6 +516,7 @@ def test_keep_models_loaded_hands_the_worker_to_the_next_run(settings, monkeypat
     events.clear()
     svc2 = ai_align.AlignService(lambda: settings, events.append, factory, handoff=held.append)
     svc2.IDLE_RELEASE = 0.0
+    settings.ignore_cache = True                                    # make it use the GPU again
     svc2.submit([p], force=True)
     assert _wait(lambda: svc2.current is not None or any(e.get("type") == "align_progress" for e in events))
     assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
@@ -553,3 +562,76 @@ def _partly(real):
         out.partial, out.verify = True, 67.0
         return out
     return ev
+
+
+class _NoGPU:
+    def align(self, *a, **k):
+        raise AssertionError("the GPU was used although the result was cached")
+
+
+def test_gpu_results_are_reused_and_cached_data_can_be_cleared(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    _find(settings, [record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    st = State(settings.resolved_state_db())
+    al = ai_align.Aligner(command=fake_cmd())
+    try:
+        ev = ai_align.align_one(settings, p, al, st, 70)
+        assert ev["status"] == "aligned" and not ev["cached"]
+        # aligned already: skipped, even when asked for (right-click), and without the GPU
+        ev = ai_align.align_one(settings, p, _NoGPU(), st, 70, force=True)
+        assert ev["status"] == "aligned" and ev["reason"].startswith("already aligned")
+        # the record is gone but the GPU result is cached: judged again without the GPU
+        st.db.execute("DELETE FROM aligned")
+        st.set_pending(p, "lrclib", "x", LYR)
+        ev = ai_align.align_one(settings, p, _NoGPU(), st, 70, force=True)
+        assert ev["status"] == "aligned" and ev["cached"] and "cached GPU result" in ev["reason"]
+        # the player's Auto-align reuses it too
+        res = ai_align.cached_or_align(settings, st, _NoGPU(), p, [b for _, b in ai_align.lyric_lines(LYR)], 0.5)
+        assert res["ok"] and res["cached"]
+        # a changed audio file isn't matched to the old result
+        os.utime(p, ns=(1, 1))
+        with pytest.raises(AssertionError):
+            ai_align.cached_or_align(settings, st, _NoGPU(), p, [b for _, b in ai_align.lyric_lines(LYR)], 0.5)
+    finally:
+        al.close()
+        st.close()
+
+
+def test_clear_cache_undoes_alignment_and_forgets_lookups(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    lib = FakeLrclib([record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=lib).run()
+    first = len(lib.calls)
+    assert first
+    Engine(settings, lambda e: None, lrclib=lib).run()
+    assert len(lib.calls) == first                              # handled before: nothing looked up again
+    st = State(settings.resolved_state_db())
+    al = ai_align.Aligner(command=fake_cmd())
+    try:
+        assert ai_align.align_one(settings, p, al, st, 70)["status"] == "aligned"
+        assert "aligned" in st.get_pending(p)[1]
+        st.set_override(p, "keep")
+        done = st.clear_cache(p)
+        assert "online lookup" in done and "GPU results" in done and "Find's record" in done
+        assert st.get_aligned(p) is None
+        st.clear_override(p)                                    # your choices are kept by clear_cache
+    finally:
+        al.close()
+        st.close()
+    st = State(settings.resolved_state_db())
+    try:
+        assert lrc.same_lyrics(st.get_pending(p)[2], LYR) and "aligned" not in st.get_pending(p)[1]
+        assert "online-original" not in st.get_candidates(p)
+        assert lrc.same_lyrics(st.get_candidates(p)["online"][1], LYR)
+    finally:
+        st.close()
+    Engine(settings, lambda e: None, lrclib=lib).run()
+    assert len(lib.calls) > first                               # looked up again
+    # Ignore cached results: everything is looked up again
+    n = len(lib.calls)
+    settings.ignore_cache = True
+    Engine(settings, lambda e: None, lrclib=lib).run()
+    assert len(lib.calls) > n

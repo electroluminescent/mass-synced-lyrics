@@ -913,6 +913,7 @@ def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, m
     app.align_service.join(10)
     app.align_service = None
     app._release_held_aligner()                                # fresh worker reads the new env
+    app.settings.ignore_cache = True                           # (not the cached result of the first run)
     rv.auto_align()
     assert _pump(app, lambda: rv._align_req is None)
     assert not rv.pins and "Not applied" in rv.v_ai_note.get() and not rv.has_edits()
@@ -1252,3 +1253,61 @@ def test_auto_align_button_belongs_to_its_song_and_shows_progress(settings, tmp_
     assert ai_align.STAGE_LABEL["separate"] == "Isolating the vocals"
     rv.shutdown()
     app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_batch_alignment_shows_on_a_song_opened_before_and_cache_can_be_cleared(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    import sys as _sys
+
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import ai_align
+    from mass_synced_lyrics.engine import Engine
+
+    lyr = "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib([record(title="Other Tune (Live)", synced=lyr,
+                                                                duration=12)])).run()
+    app = new_app(settings)
+    rv = app.review
+    app.nb.select(rv)
+    k = state_key(p)
+    rv.add_row(k, "proposed", "lrclib", "Some Artist", "Other Tune", "", "found", "online")
+    rv.player.silent_reason = "test"
+    rv.tree.selection_set(k)
+    assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
+    rv.set_line_time(0, 0.6)                                  # opened and touched before: prefs are saved
+    rv._save_prefs()
+    assert rv.song.prefs.get("pins")
+    # the batch aligns it meanwhile
+    al = ai_align.Aligner(command=[_sys.executable, os.path.join(os.path.dirname(__file__), "fake_aligner.py")])
+    ai_align.run(settings, [p], lambda e: None, aligner=al, everything=True)
+    al.close()
+    rv.load_song(k)
+    tok = rv._token
+    assert _pump(app, lambda: getattr(rv, "_loaded_token", 0) == tok and rv.audio is not None)
+    app.update()
+    assert rv.ai_keys and rv.edited_segs()                     # the purple GPU edits show (they didn't)
+    assert rv.pins[rv._line_key(0)] == pytest.approx(0.6)     # your own time is kept
+    # buttons don't keep the keyboard focus: Space plays instead of pressing Auto-align again
+    assert str(rv.btn_ai.cget("takefocus")) == "0"
+    # Clear cached data: the alignment is undone
+    monkeypatch.setattr(gui_messagebox(), "askyesno", lambda *a, **kw: True)
+    app.clear_cache_command([k])
+    tok = rv._token
+    assert _pump(app, lambda: getattr(rv, "_loaded_token", 0) == tok and rv.audio is not None)
+    app.update()
+    assert not rv.ai_keys and rv.tree.set(k, "align") == ""
+    assert "Cleared cached data for 1 of 1" in app.txt.get("1.0", "end")
+    assert not app.v_ignore_cache.get() and not app.settings.ignore_cache          # off by default
+    rv.shutdown()
+    app.destroy()
+
+
+def gui_messagebox():
+    from mass_synced_lyrics import gui
+    return gui.messagebox

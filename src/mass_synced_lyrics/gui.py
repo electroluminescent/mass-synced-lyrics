@@ -132,6 +132,7 @@ class App(tk.Tk):
         self.v_fit_audio = tk.BooleanVar()
         self.v_ai = tk.BooleanVar()
         self.v_ai_keep = tk.BooleanVar(value=True)
+        self.v_ignore_cache = tk.BooleanVar(value=False)
         self._held_aligner = None
         self._held_lock = threading.Lock()
         self.v_ai_min = tk.IntVar()
@@ -259,6 +260,11 @@ class App(tk.Tk):
                                  "libraries don't treat it as changed."),
                                 ("Retry songs not found in earlier runs", self.v_retry,
                                  "Search online again for songs that had no lyrics last time."),
+                                ("Ignore cached results", self.v_ignore_cache,
+                                 "Work everything out again instead of reusing earlier results: songs Find already "
+                                 "handled, online lookups, and what the GPU heard (songs are aligned again from "
+                                 "their found timing). Slower. Off by default. To redo only some songs, select "
+                                 "them in Review & player and use Clear cached data."),
                                 ("List only songs with lyrics found", self.v_only_found,
                                  "Review & player lists only the songs that have lyrics to write. Songs with "
                                  "nothing found (or already synced) are left out. Turn the list's Lyrics found "
@@ -359,6 +365,7 @@ class App(tk.Tk):
         self.v_fit.set(snap5(s.confident_fit, 0, 100))
         self.v_ai.set(bool(s.ai_align))
         self.v_ai_keep.set(bool(getattr(s, "ai_keep_loaded", True)))
+        self.v_ignore_cache.set(bool(getattr(s, "ignore_cache", False)))
         self.v_ai_min.set(snap5(s.ai_align_min, 50, 100))
         self.v_fit_audio.set(bool(s.fit_audio))
         self.v_only_found.set(bool(s.only_found))
@@ -388,6 +395,7 @@ class App(tk.Tk):
         s.fit_audio = bool(self.v_fit_audio.get())
         s.ai_align = bool(self.v_ai.get())
         s.ai_keep_loaded = bool(self.v_ai_keep.get())
+        s.ignore_cache = bool(self.v_ignore_cache.get())
         s.ai_align_min = self._ai_min_value()
         s.only_found = bool(self.v_only_found.get())
         s.output_mode = self.v_output.get()
@@ -765,7 +773,9 @@ class App(tk.Tk):
                 "aligned": "done", "rejected": "skip", "error": "fail"}.get(e["status"], "skip"))
             self.v_status.set(f"Aligning on the GPU · {svc.done if svc else 0} done"
                               + (f" · {waiting} waiting" if waiting else ""))
-            if e["status"] == "aligned":
+            if e["status"] == "aligned" and str(e.get("reason", "")).startswith("already aligned"):
+                self._log(f"Skipped (already aligned on the GPU): {name}")
+            elif e["status"] == "aligned":
                 kind = e.get("kind") or "online"
                 kw = {f"conf_{kind}": e.get("confidence"), f"fit_{kind}": e.get("fit")}
                 if e["path"] in self.review.rows:
@@ -1358,6 +1368,39 @@ class App(tk.Tk):
         self.v_ai.set(True)
         self._ai_toggled()
         return bool(self.settings.ai_align)
+
+    def clear_cache_command(self, songs: list[str] | None = None) -> None:
+        """Clear cached data for songs (selected in Review & player when not given)."""
+        from .state import State
+
+        songs = list(songs) if songs else self.review.selected_songs()
+        if not songs:
+            messagebox.showinfo(APP_TITLE, "Select songs in the Review & player list first.")
+            return
+        n = len(songs)
+        if not messagebox.askyesno(APP_TITLE, f"Clear cached data for {n} song{'s' if n != 1 else ''}?\n\n"
+                                   "The next Find and Align work them out again: the online lookup, what the GPU "
+                                   "heard, and Find's record of them. A GPU alignment is undone (the found lyrics "
+                                   "go back to their found timing).\n\nYour choices, edits and the backups of "
+                                   "original lyrics are kept. No files are changed."):
+            return
+        st = State(self.settings.resolved_state_db())
+        cleared = 0
+        try:
+            for p in songs:
+                if st.clear_cache(p):
+                    cleared += 1
+                if p in self.review.rows:
+                    r = self.review.rows[p]
+                    if r.get("status") == "aligned":
+                        r["status"] = "proposed"
+                    self.review.add_row(p, ops={"align": ""})
+        finally:
+            st.close()
+        self._log(f"Cleared cached data for {cleared} of {n} song(s). Run Find lyrics or Align to work them out again.")
+        if self.review.song is not None and self.review.song.path in songs:
+            self.review.load_song(self.review.song.path)
+        self.refresh_apply_bar()
 
     def align_command(self, which: str, songs: list[str] | None = None) -> None:
         """The Align (GPU) buttons: "low" = the low-confidence songs in the list, "selected" = the

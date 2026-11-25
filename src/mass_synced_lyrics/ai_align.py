@@ -775,6 +775,41 @@ def _hash(text: str) -> str:
     return hashlib.sha1((text or "").encode("utf-8", "replace")).hexdigest()
 
 
+def file_sig(path: str) -> str:
+    """Size and modified time: a cached GPU result is only reused while the audio file is unchanged."""
+    from .paths import to_long_path
+    try:
+        st = os.stat(to_long_path(display_path(path)))
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return ""
+
+
+def cached_or_align(settings, st, al, path: str, lines: list[str], probe: float, on_progress=None) -> dict:
+    """The worker's result for these lyric lines on this song: from the cache when it was worked out
+    before (unless Ignore cached results is on), otherwise from the GPU (and then cached)."""
+    model = getattr(settings, "ai_align_model", "medium")
+    key, sig = _hash("\n".join(lines)), file_sig(path)
+    if st is not None and sig and not getattr(settings, "ignore_cache", False):
+        hit = st.get_align_cache(path, key, model, sig)
+        if hit is not None:
+            hit = dict(hit, cached=True)
+            if on_progress is not None:
+                on_progress("check", None)
+            return hit
+    if on_progress is not None:
+        result = al.align(path, lines, probe=probe, on_progress=on_progress)
+    else:
+        result = al.align(path, lines, probe=probe)
+    if st is not None and sig and result.get("ok"):
+        try:
+            st.set_align_cache(path, key, model, sig, {k: v for k, v in result.items() if k not in ("id", "trace")})
+            st.commit()
+        except Exception:
+            pass
+    return result
+
+
 def pick_low_confidence(settings, paths) -> list[str]:
     """Proposals (no per-file choice) below the High confidence or Good fit level."""
     from .paths import state_key
@@ -819,18 +854,18 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
     kind = "online" if source == "lrclib" else "local"
     ev["kind"] = kind
     h = _hash(text)
-    prev = st.get_aligned(path)
+    fresh = bool(getattr(settings, "ignore_cache", False))
+    prev = None if fresh else st.get_aligned(path)
     base = text                                                  # the timing the aligner starts from
-    if force:
-        if prev is not None and prev[1] and prev[4] and lrcmod.same_lyrics(prev[4], text):
-            det = st.get_aligned_detail(path) or {}
-            if det.get("orig"):
-                base = det["orig"]
-                label = re.split(r" · (?:partly )?aligned \(", label)[0]
-        prev = None
-    if (prev is not None and not prev[1] and "(needs " in (prev[3] or "")
-            and (prev[2] or 0) >= min(minimum, VERIFY_FLOOR)):
-        prev = None        # turned down by an older version only for being under the minimum: use it now
+    if fresh:
+        det = st.get_aligned_detail(path) or {}
+        if det.get("ok") and det.get("orig") and lrcmod.same_lyrics(det.get("text") or "", text):
+            base = det["orig"]                                   # align again from the found timing
+            label = re.split(r" · (?:partly )?aligned \(", label)[0]
+    if prev is not None and not prev[1] and (force or (
+            "(needs " in (prev[3] or "") and (prev[2] or 0) >= min(minimum, VERIFY_FLOOR))):
+        prev = None        # asked again, or turned down by an older version only for the minimum: judge again
+        #                    (from the cached GPU result when there is one: no GPU needed)
     if prev is not None and prev[0] == h:                        # done before for these exact lyrics
         if prev[1] and prev[4]:
             st.use_aligned(path, kind, text, prev[4], label, prev[5], prev[6])
@@ -840,7 +875,8 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
         return dict(ev, status="rejected", verify=prev[2], reason=prev[3])
     if prev is not None and prev[1] and prev[4] and lrcmod.same_lyrics(prev[4], text):
         return dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
-                    reason="already aligned", partial=(prev[3] or "").startswith("partly"))
+                    reason="already aligned on the GPU — skipped (clear its cached data to align it again)",
+                    partial=(prev[3] or "").startswith("partly"), cached=True)
     items = lyric_lines(base)
     if len(items) < 2:
         return dict(ev, reason="fewer than 2 timed lines")
@@ -850,10 +886,10 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
         dur = None
     if progress is not None:
         progress.set_duration(dur)
-        result = al.align(path, [b for _, b in items], probe=items[0][0], on_progress=progress.step)
+    result = cached_or_align(settings, st, al, path, [b for _, b in items], items[0][0],   # AlignerError
+                             progress.step if progress is not None else None)            # propagates
+    if progress is not None:
         progress.step("check")
-    else:
-        result = al.align(path, [b for _, b in items], probe=items[0][0])   # AlignerError propagates
     if dur is None and result.get("duration"):
         dur = float(result["duration"])
     mode = "ripple" if getattr(settings, "ripple", False) else "slope"
@@ -883,8 +919,10 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
                    heard=out.heard, mode=mode, ends=out.ends, confs=out.line_conf)
     st.commit()
     return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit, partial=out.partial,
+                cached=bool(result.get("cached")),
                 reason=f"{out.pins} of {out.lines} lines placed from the audio, the rest interpolated; "
-                       f"typical shift {out.moved:.2f} s")
+                       f"typical shift {out.moved:.2f} s" + (" (from the cached GPU result)" if result.get("cached")
+                                                            else ""))
 
 
 def run(settings, paths, emit, cancel: threading.Event | None = None, aligner: Aligner | None = None,
@@ -1079,7 +1117,10 @@ class AlignService:
                         try:
                             if nvidia_gpu() is None:
                                 raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
-                            result = self._align_retrying(s, prog, path, lines, probe)
+                            if st is None:
+                                st = State(s.resolved_state_db())
+                            result = cached_or_align(s, st, _Retrying(self, s, prog), path, lines, probe,
+                                                     prog.step)
                         except Exception as e:
                             msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
                             self._done_progress(prog, learn=False)

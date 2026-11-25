@@ -144,7 +144,7 @@ The lyric lanes and the New list follow every change live, whether it comes from
 
 Songs aligned while finding open the same way: the found lyrics with the aligner's purple times on top of the original timing. **Clear edits** goes back to the original timing.
 
-Pins, edits and checkpoints are saved per song.
+Pins, edits and checkpoints are saved per song. A song aligned on the GPU after you last opened it shows that alignment (purple), and the times you set yourself are kept.
 
 **Apply confident** (bottom bar, beside Apply) writes the found lyrics at or above both the **High confidence** and **Good fit** levels straight away, without asking. Songs with your own choices or edits are left for **Apply**.
 
@@ -188,7 +188,16 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 
 If 3 songs in a row fail on their own (unreadable files, say), the same window appears.
 
-Songs are aligned only once for the same lyrics. To align particular songs regardless of their scores, select them and use **right-click → ⚡ Align on the GPU**. This aligns them again even if they were aligned before, starting from the original timing. Songs with your own choice are skipped, and the log says so.
+To align particular songs regardless of their scores, select them and use **right-click → ⚡ Align on the GPU**. Songs with your own choice are skipped, and the log says so.
+
+**Nothing is worked out twice:**
+- A song already aligned on the GPU is skipped, also when you ask for it.
+- What the GPU heard is kept per song and set of lyric lines, for as long as the audio file is unchanged. Aligning the same lyrics again (in a batch, from the right-click menu or with Auto-align) reuses it instantly, judged against the current settings.
+- Find skips songs it handled before, and online lookups are reused.
+
+**To redo songs:**
+- Select them and use **Clear cached data**, under the list or on the right-click menu. This forgets their online lookup, what the GPU heard and Find's record, and undoes their GPU alignment (back to the found timing). Your choices, edits and the backups of original lyrics are kept, and no files are changed.
+- Or switch on **Ignore cached results** (Find lyrics tab, off by default) to work everything out again.
 
 If the GPU worker crashes or stops answering, it is restarted and the song is tried once more before alignment pauses. **Stop** stops the alignment after the current song.
 

@@ -314,6 +314,8 @@ class Engine:
         if mode == LRC and prev is not None and prev[2] in FINAL and os.path.exists(lrc_path_for(path)) \
                 and prev[2] in MISSES:
             unchanged = False  # a .lrc appeared since
+        if getattr(s, "ignore_cache", False):
+            unchanged = False                  # Ignore cached results: handle the file as if new
         if match is None and unchanged and prev[2] in FINAL:
             recheck_collection = prev[2] in MISSES and self.collection is not None and len(self.collection)
             if not (s.retry_misses and prev[2] in MISSES) and not recheck_collection:
@@ -395,6 +397,7 @@ class Engine:
             note = "; ".join(x for x in (note, "online lookup skipped: synced lyrics already embedded") if x)
         if online_ok and (local is None or find):
             found = self._lookup(ident, dur, state)
+            state.set_file_lookup(path, lookup_key(ident, dur))
             if found.status == "found":
                 found.synced = s.tidy(found.synced)
                 found.confidence = self._ident_conf(found.confidence, how)
@@ -493,7 +496,7 @@ class Engine:
 
     def _lookup(self, meta: Meta, duration: float | None, state: State) -> LyricsResult:
         key = lookup_key(meta, duration)
-        cached = state.get_lookup(key)
+        cached = None if getattr(self.s, "ignore_cache", False) else state.get_lookup(key)
         if cached and (cached[0] == "found" or not self.s.retry_misses):
             p = cached[1]
             conf = p.get("confidence")
