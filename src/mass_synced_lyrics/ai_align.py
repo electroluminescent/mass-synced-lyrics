@@ -235,6 +235,10 @@ class Aligner:
         self._p: subprocess.Popen | None = None
         self._out: queue.Queue = queue.Queue()
         self._id = 0
+        self.loaded = False             # this worker has finished a song, so its models are in memory
+
+    def running(self) -> bool:
+        return self._p is not None and self._p.poll() is None
 
     def _command(self) -> list[str]:
         if self._cmd:
@@ -257,6 +261,7 @@ class Aligner:
                                    stderr=self._err, text=True, encoding="utf-8", env=env,
                                    creationflags=_NO_WINDOW)
         self._out = queue.Queue()
+        self.loaded = False
         threading.Thread(target=self._reader, args=(self._p, self._out), daemon=True).start()
         msg = self._next(timeout)
         if not msg.get("ready"):
@@ -286,7 +291,10 @@ class Aligner:
         return msg
 
     def align(self, audio_path: str, lines: list[str], probe: float = 0.0, language: str | None = None,
-              timeout: float = 900) -> dict:
+              timeout: float = 900, on_progress=None) -> dict:
+        """on_progress(stage, frac): called (on this thread) as the worker reports its steps."""
+        if not self.running() and on_progress is not None:
+            on_progress("start", None)
         self.start()
         self._id += 1
         req = {"id": self._id, "audio": display_path(audio_path), "lines": lines, "probe": probe,
@@ -299,8 +307,18 @@ class Aligner:
             raise AlignerError(f"the aligner closed unexpectedly: {e}") from None
         while True:
             msg = self._next(timeout)
-            if msg.get("id") == self._id:
-                return msg
+            if msg.get("id") != self._id:
+                continue
+            if "progress" in msg:
+                if on_progress is not None:
+                    try:
+                        on_progress(str(msg["progress"]), msg.get("frac"))
+                    except Exception:
+                        pass
+                continue
+            if msg.get("ok"):
+                self.loaded = True
+            return msg
 
     def close(self) -> None:
         p, self._p = self._p, None
@@ -320,6 +338,157 @@ class Aligner:
                 err.close()
             except OSError:
                 pass
+
+
+# ------------------------------------------------------------------ progress of one song
+# The steps of aligning one song, in order, with what the progress bar says during each.
+STAGES = (("start", "Starting the GPU worker"), ("load_separator", "Loading the vocal model"),
+          ("decode", "Reading the audio"), ("separate", "Isolating the vocals"),
+          ("load_whisper", "Loading the speech model"), ("language", "Detecting the language"),
+          ("align", "Placing the lyric words"), ("transcribe", "Listening to what was sung"),
+          ("cleanup", "Freeing GPU memory"), ("check", "Checking and saving"))
+STAGE_LABEL = dict(STAGES)
+STAGE_ORDER = [k for k, _ in STAGES]
+ONCE = {"start", "load_separator", "load_whisper"}     # only when the worker (or its models) isn't loaded yet
+# Estimated cost of each step: (fixed seconds, seconds per minute of audio). Measured on an RTX 3070
+# (medium model, songs of 2.8-5.7 minutes: about 26 s for a 3.6-minute song); replaced by this PC's
+# own measurements as songs are aligned (timings.json).
+DEFAULT_COST = {"start": (3.0, 0.0), "load_separator": (0.8, 0.0), "decode": (0.1, 0.2),
+                "separate": (0.3, 1.6), "load_whisper": (5.3, 0.0), "language": (0.3, 0.0),
+                "align": (0.5, 1.0), "transcribe": (1.0, 4.4), "cleanup": (0.1, 0.0), "check": (0.3, 0.3)}
+PER_MINUTE = {"decode", "separate", "align", "transcribe", "check"}
+_cost_lock = threading.Lock()
+_cost_cache: dict | None = None
+
+
+def _timings_path() -> str:
+    return os.path.join(addon_dir(), "timings.json")
+
+
+def stage_costs() -> dict:
+    """{stage: (fixed s, s per minute)}: this PC's measurements where there are some."""
+    global _cost_cache
+    with _cost_lock:
+        if _cost_cache is None:
+            _cost_cache = dict(DEFAULT_COST)
+            try:
+                with open(_timings_path(), encoding="utf-8") as f:
+                    for k, v in json.load(f).items():
+                        if k in DEFAULT_COST and isinstance(v, list) and len(v) == 2:
+                            _cost_cache[k] = (float(v[0]), float(v[1]))
+            except (OSError, ValueError, TypeError):
+                pass
+        return dict(_cost_cache)
+
+
+def learn_timings(times: dict, duration: float | None) -> None:
+    """Fold one song's measured step times into the estimates (moving average, kept on disk)."""
+    global _cost_cache
+    costs = stage_costs()
+    minutes = max(0.25, (duration or 0) / 60.0)
+    for k, t in times.items():
+        if k not in costs or t is None or t < 0 or t > 1800:
+            continue
+        fixed, per = costs[k]
+        if k in PER_MINUTE:
+            per = per * 0.7 + max(0.0, t - fixed) / minutes * 0.3
+        else:
+            fixed = fixed * 0.7 + t * 0.3
+        costs[k] = (round(fixed, 3), round(per, 4))
+    with _cost_lock:
+        _cost_cache = costs
+    try:
+        os.makedirs(addon_dir(), exist_ok=True)
+        tmp = _timings_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({k: list(v) for k, v in costs.items()}, f)
+        os.replace(tmp, _timings_path())
+    except OSError:
+        pass
+
+
+class SongProgress:
+    """How far one song's alignment is, as a share of its estimated time. Each step gets a slice of the
+    bar sized by its estimate (from the song's length and this PC's measured speed); within a step the
+    worker's own progress is used where it reports one (vocal isolation, listening), otherwise the time
+    spent against the estimate. Written by the aligner thread, read by the GUI."""
+
+    def __init__(self, path: str, duration: float | None, warm: bool, running: bool, kind: str = "song",
+                 clock=None):
+        import time
+        self._clock = clock or time.monotonic
+        self.path, self.kind = path, kind
+        self.duration = duration if duration and duration > 0 else None
+        self.costs = stage_costs()
+        skip = set() if not running else ({"start"} | (ONCE if warm else set()))
+        self.plan = [k for k in STAGE_ORDER if k not in skip]
+        self.stage, self.frac, self.t0 = self.plan[0], None, self._clock()
+        self.started = self.t0
+        self.times: dict = {}
+        self.retries = 0
+
+    def estimate(self, k: str) -> float:
+        fixed, per = self.costs.get(k, (1.0, 0.0))
+        return max(0.05, fixed + per * (self.duration or 240.0) / 60.0)
+
+    def set_duration(self, d: float | None) -> None:
+        if d and d > 0:
+            self.duration = d
+
+    def step(self, stage: str, frac=None) -> None:
+        if stage not in STAGE_LABEL:
+            return
+        now = self._clock()
+        if stage != self.stage:
+            self.times[self.stage] = self.times.get(self.stage, 0.0) + now - self.t0
+            if stage not in self.plan:                 # e.g. the models had to be loaded again
+                self.plan.insert(min((i for i, k in enumerate(self.plan)
+                                      if STAGE_ORDER.index(k) > STAGE_ORDER.index(stage)), default=len(self.plan)),
+                                 stage)
+            self.stage, self.t0 = stage, now
+        self.frac = None if frac is None else max(0.0, min(1.0, float(frac)))
+
+    def restart(self) -> None:
+        """The worker crashed and is being restarted for another try: it has to load everything again."""
+        self.retries += 1
+        self.plan = list(STAGE_ORDER)
+        self.stage, self.frac, self.t0 = "start", None, self._clock()
+
+    def finish(self) -> dict:
+        now = self._clock()
+        self.times[self.stage] = self.times.get(self.stage, 0.0) + now - self.t0
+        self.stage = "done"
+        return dict(self.times)
+
+    def snapshot(self) -> dict:
+        """{"frac": 0..1 of the whole song, "stage", "label", "stage_frac", "left": seconds}"""
+        plan, stage = list(self.plan), self.stage
+        if stage == "done":
+            return {"frac": 1.0, "stage": stage, "label": "Done", "stage_frac": 1.0, "left": 0.0}
+        est = {k: self.estimate(k) for k in plan}
+        total = sum(est.values()) or 1.0
+        i = plan.index(stage) if stage in plan else 0
+        before = sum(est[k] for k in plan[:i])
+        cur = est.get(stage, 1.0)
+        spent = self._clock() - self.t0
+        if self.frac is not None:
+            sf = self.frac
+        else:                                          # no report: time spent against the estimate,
+            sf = 1.0 - 0.5 ** (spent / cur)            # easing off so it never claims to be done
+        sf = max(0.0, min(0.99, sf))
+        left_cur = max(cur - spent, cur * (1 - sf)) if self.frac is None else \
+            (spent / sf * (1 - sf) if sf > 0.05 else cur * (1 - sf))
+        left = left_cur + sum(est[k] for k in plan[i + 1:])
+        label = STAGE_LABEL.get(stage, stage)
+        if self.retries:
+            label += " (retrying)"
+        return {"frac": max(0.0, min(0.999, (before + cur * sf) / total)), "stage": stage, "label": label,
+                "stage_frac": sf, "left": max(0.0, left)}
+
+    def song_estimate(self, duration: float | None = None) -> float:
+        """Seconds for another song like this one with everything loaded."""
+        d = duration or self.duration or 240.0
+        return sum(self.costs[k][0] + self.costs[k][1] * d / 60.0 for k in STAGE_ORDER if k not in ONCE)
 
 
 # ------------------------------------------------------------------ using the alignment
@@ -618,9 +787,12 @@ def pick_low_confidence(settings, paths) -> list[str]:
     return out
 
 
-def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
+def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: bool = False,
+              progress: "SongProgress | None" = None) -> dict:
     """Align one song's proposal. Returns an align_progress-style dict (status aligned / rejected /
-    error / skipped). Raises AlignerError when the worker itself fails (not this song)."""
+    error / skipped). Raises AlignerError when the worker itself fails (not this song).
+    force=True (asked for this song): align again even if it was aligned or judged before; a song
+    aligned before is aligned again from its original timing."""
     from . import fit as fitmod
     from .paths import to_long_path
     from .tags import TagFile
@@ -628,13 +800,23 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
     ev = {"type": "align_progress", "path": path, "status": "skipped", "verify": None, "reason": "",
           "kind": "", "confidence": None, "fit": None}
     pend = st.get_pending(path)
-    if pend is None or st.get_override(path) is not None:
-        return dict(ev, reason="nothing to align")
+    if pend is None:
+        return dict(ev, reason="no found lyrics waiting to be saved")
+    if st.get_override(path) is not None:
+        return dict(ev, reason="it has your own choice — Reset to default first, or use Auto-align in the player")
     source, label, text = pend[0], pend[1], pend[2]
     kind = "online" if source == "lrclib" else "local"
     ev["kind"] = kind
     h = _hash(text)
     prev = st.get_aligned(path)
+    base = text                                                  # the timing the aligner starts from
+    if force:
+        if prev is not None and prev[1] and prev[4] and lrcmod.same_lyrics(prev[4], text):
+            det = st.get_aligned_detail(path) or {}
+            if det.get("orig"):
+                base = det["orig"]
+                label = label.split(" · aligned (")[0]
+        prev = None
     if prev is not None and prev[0] == h:                        # done before for these exact lyrics
         if prev[1] and prev[4]:
             st.use_aligned(path, kind, text, prev[4], label, prev[5], prev[6])
@@ -645,19 +827,26 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
     if prev is not None and prev[1] and prev[4] and lrcmod.same_lyrics(prev[4], text):
         return dict(ev, status="aligned", verify=prev[2], confidence=prev[5], fit=prev[6],
                     reason="already aligned")
-    items = lyric_lines(text)
+    items = lyric_lines(base)
     if len(items) < 2:
         return dict(ev, reason="fewer than 2 timed lines")
     try:
         dur = TagFile(to_long_path(path)).duration
     except Exception:
         dur = None
-    result = al.align(path, [b for _, b in items], probe=items[0][0])       # AlignerError propagates
+    if progress is not None:
+        progress.set_duration(dur)
+        result = al.align(path, [b for _, b in items], probe=items[0][0], on_progress=progress.step)
+        progress.step("check")
+    else:
+        result = al.align(path, [b for _, b in items], probe=items[0][0])   # AlignerError propagates
+    if dur is None and result.get("duration"):
+        dur = float(result["duration"])
     mode = "ripple" if getattr(settings, "ripple", False) else "slope"
-    out = evaluate(text, result, dur, minimum, mode)
+    out = evaluate(base, result, dur, minimum, mode)
     if not out.ok:
         if result.get("ok"):                     # a judgement about these lyrics: remember it
-            st.set_aligned(path, h, False, out.verify, out.reason, kind=kind, orig=text, heard=out.heard,
+            st.set_aligned(path, h, False, out.verify, out.reason, kind=kind, orig=base, heard=out.heard,
                            mode=mode)
             st.commit()
             return dict(ev, status="rejected", verify=out.verify, reason=out.reason)
@@ -667,9 +856,9 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
     old_conf = st.pending_scores().get(path, (None, None))[0]
     conf = round(max(old_conf or 0.0, out.verify), 1)
     new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
-    if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit):
+    if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit, base=base):
         return dict(ev, reason="changed or saved meanwhile")
-    st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind, orig=text, pins=out.pin_map,
+    st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind, orig=base, pins=out.pin_map,
                    heard=out.heard, mode=mode, ends=out.ends, confs=out.line_conf)
     st.commit()
     return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit,
@@ -721,6 +910,16 @@ def is_low_confidence(settings, confidence: float | None, fit: float | None) -> 
         (fit is not None and fit < float(settings.confident_fit))
 
 
+class _Retrying:
+    """What align_one sees as the aligner: the service's worker, restarted once if it fails."""
+
+    def __init__(self, svc: "AlignService", settings, prog: SongProgress):
+        self.svc, self.settings, self.prog = svc, settings, prog
+
+    def align(self, path, lines, probe=0.0, on_progress=None):
+        return self.svc._align_retrying(self.settings, self.prog, path, lines, probe)
+
+
 class AlignService:
     """Aligns songs in the background while Find keeps running. Songs are queued as they are found.
     When the aligner fails it pauses (the queue keeps filling) and emits align_error; the app then
@@ -743,6 +942,8 @@ class AlignService:
         self.done = 0
         self._thread: threading.Thread | None = None
         self._aligner: Aligner | None = None
+        self.current: SongProgress | None = None     # the song being aligned now (read by the GUI)
+        self.current_token = None                    # its Auto-align token, for a player request
 
     # -- control (any thread)
     def submit(self, paths, force: bool = False) -> int:
@@ -763,19 +964,23 @@ class AlignService:
             self._ensure_thread()
         return n
 
-    def request_raw(self, path: str, lines: list[str], probe: float, token) -> None:
+    def request_raw(self, path: str, lines: list[str], probe: float, token, duration: float | None = None) -> None:
         """Align these lines for the player, ahead of the queued songs. Nothing is stored: the result
         comes back as an align_raw event (with `token`) for the player to apply as edits."""
         with self._cv:
             if self.stopped:
                 return
-            self._q.appendleft(("raw", path, list(lines), float(probe or 0), token))
+            self._q.appendleft(("raw", path, list(lines), float(probe or 0), token, duration))
             self._cv.notify_all()
         self._ensure_thread()
 
     def pending(self) -> int:
         with self._cv:
-            return len(self._q)
+            return sum(1 for it in self._q if it[0] == "song")
+
+    def raw_waiting(self, token) -> bool:
+        with self._cv:
+            return any(it[0] == "raw" and it[4] == token for it in self._q)
 
     def idle(self) -> bool:
         with self._cv:
@@ -790,9 +995,13 @@ class AlignService:
         """Finish the current song, drop the queue and shut the worker down."""
         with self._cv:
             self.stopped = True
+            dropped = [it for it in self._q if it[0] == "raw"]
             self._q.clear()
             self._queued.clear()
             self._cv.notify_all()
+        for it in dropped:                      # the player is waiting for these: tell it they won't come
+            self._emit({"type": "align_raw", "token": it[4], "path": it[1],
+                        "result": {"ok": False, "error": "aligning was stopped"}})
 
     def reset_counts(self) -> None:
         self.counts = {k: 0 for k in self.counts}
@@ -840,22 +1049,22 @@ class AlignService:
                 try:
                     s = self._settings_fn()
                     if item[0] == "raw":
-                        _, path, lines, probe, token = item
+                        _, path, lines, probe, token, duration = item
+                        prog = self._progress(path, duration, "raw")
+                        self.current_token = token
                         try:
                             if nvidia_gpu() is None:
                                 raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
-                            if self._aligner is None:
-                                self._aligner = self._factory(s)
-                            result = self._aligner.align(path, lines, probe=probe)
+                            result = self._align_retrying(s, prog, path, lines, probe)
                         except Exception as e:
                             msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
+                            self._done_progress(prog, learn=False)
                             self._emit({"type": "align_raw", "token": token, "path": path,
                                         "result": {"ok": False, "error": msg}})
-                            if self._aligner is not None:
-                                self._aligner.close()
-                                self._aligner = None
                             self._pause(msg, path)
                             continue
+                        prog.step("check")
+                        self._done_progress(prog)
                         self._emit({"type": "align_raw", "token": token, "path": path, "result": result})
                         continue
                     _, path, force = item
@@ -866,17 +1075,19 @@ class AlignService:
                         if not is_low_confidence(s, c, f):
                             continue
                     self._emit({"type": "align_song_start", "path": path})
+                    prog = self._progress(path, None, "song")
                     try:
                         if nvidia_gpu() is None:
                             raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
-                        if self._aligner is None:
-                            self._aligner = self._factory(s)
-                        ev = align_one(s, path, self._aligner, st, float(getattr(s, "ai_align_min", 70)))
+                        ev = align_one(s, path, _Retrying(self, s, prog), st, float(getattr(s, "ai_align_min", 70)),
+                                       force=force, progress=prog)
                     except Exception as e:                  # the aligner itself failed (or something unexpected)
                         msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
+                        self._done_progress(prog, learn=False)
                         self._fail(path, msg)
                         streak = 0
                         continue
+                    self._done_progress(prog, learn=ev["status"] in ("aligned", "rejected"))
                     self.done += 1
                     self.counts[ev["status"]] += 1
                     ev["queued"] = self.pending()
@@ -901,6 +1112,37 @@ class AlignService:
             if st is not None:
                 st.close()
             self.busy = False
+
+    def _progress(self, path: str, duration, kind: str) -> SongProgress:
+        al = self._aligner
+        running = al is not None and al.running()
+        self.current = SongProgress(path, duration, warm=running and al.loaded, running=running, kind=kind)
+        return self.current
+
+    def _done_progress(self, prog: SongProgress, learn: bool = True) -> None:
+        times = prog.finish()
+        if learn:
+            learn_timings(times, prog.duration)
+        if self.current is prog:
+            self.current = None
+            self.current_token = None
+
+    def _align_retrying(self, s, prog: SongProgress, path: str, lines, probe: float) -> dict:
+        """Run the worker; if it crashes or stops answering, start a fresh one and try once more
+        (most failures are one-off: a driver hiccup, memory left over from the previous song)."""
+        for attempt in (1, 2):
+            if self._aligner is None:
+                self._aligner = self._factory(s)
+            try:
+                return self._aligner.align(path, lines, probe=probe, on_progress=prog.step)
+            except AlignerError:
+                if self._aligner is not None:
+                    self._aligner.close()
+                    self._aligner = None
+                if attempt == 2 or self.stopped:
+                    raise
+                prog.restart()
+        raise AlignerError("unreachable")
 
     def _fail(self, path: str, error: str) -> None:
         """The aligner failed on this song: it keeps its found lyrics, the worker is restarted for the

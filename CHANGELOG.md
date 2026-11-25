@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.6.0
+- **Step-by-step GPU progress:** the progress row says what the GPU is doing for the current song
+  (starting the worker, loading the vocal and speech models, reading the audio, isolating the vocals,
+  detecting the language, placing the lyric words, listening to what was sung, freeing GPU memory,
+  checking and saving), with that step's % and the time left. Each step gets a share of the bar sized
+  by its estimate, from the song's length and measured speed. The defaults were measured on an RTX 3070
+  (about 26 s for a 3.6-minute song, plus about 9 s the first time to start and load the models). As
+  songs are aligned, the estimates adjust to this PC's own speed.
+- The **Align** column shows how far the current song is (⟳ 42%). Auto-align shows its progress on the
+  button and under it.
+- **⚡ marks everything done on the GPU** (buttons, menu items, the Align column: ⚡✓ re-timed, ⚡– kept
+  as found, ⚡✗ error; Status *⚡ Aligned*). **✎ marks your own timing** (*✎ Line to playhead*; ✎ in the
+  Align column when the song has lyrics or timing you set in the player).
+- **Fixed: right-click → Align on the GPU did nothing for songs that were aligned or judged before.** It
+  now aligns them again, starting from the original timing. The item is always in the menu and offers
+  to switch alignment on. Songs it can't align now say why in the log (for example, when you've made
+  your own choice for the song).
+- **Fixed: Auto-align could stay greyed out.** This happened when the song was reloaded while it waited
+  (for example, when a batch alignment of that song finished) or when aligning was stopped. The button
+  now only waits for its own song, and other songs can be aligned meanwhile.
+- **Fewer GPU failures:**
+  - The worker crashed when a heard word or a lyric had a character outside the Windows code page (for
+    example Korean, Japanese or ♪). That is fixed.
+  - When forced alignment gives up (over half the words can't be placed in order, which is common for
+    live recordings), the song is now matched from what was heard instead of failing.
+  - If the worker crashes or stops answering, it is restarted and the song is tried once more before
+    alignment pauses.
+  - GPU memory is freed after every song, and an out-of-memory error is retried once.
+- Listening to what was sung is faster and gives the same result every time (no re-decoding of hard
+  passages).
+
 ## 1.5.0
 - **Edited lane:** the waveforms now show three lanes: Current, Found (the lyrics as found) and
   **Edited**. The Edited lane appears whenever the timing was changed, by you or by the aligner, and

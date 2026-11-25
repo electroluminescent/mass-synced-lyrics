@@ -32,7 +32,7 @@ class Activity:
             ttk.Label(f, textvariable=title_var, width=24, anchor="e").pack(side="left", padx=(0, 6))
             bar = ttk.Progressbar(f, length=170, mode="indeterminate")
             bar.pack(side="left")
-            ttk.Label(f, textvariable=detail_var, style="Muted.TLabel", width=30, anchor="w").pack(
+            ttk.Label(f, textvariable=detail_var, style="Muted.TLabel", width=50, anchor="w").pack(
                 side="left", padx=(6, 6))
             btn = theme.hint(ttk.Button(f, text=stop_text, width=6), "Stop this operation.")
             row = {"frame": f, "title": title_var, "detail": detail_var, "bar": bar, "btn": btn, "mode": None}

@@ -173,6 +173,10 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 
 **If it doesn't pass,** the song keeps its found lyrics unchanged. The activity log says why.
 
+**Progress:** the row at the top of the window shows the song number, the current step (starting the worker, loading the models, isolating the vocals, placing the lyric words, listening to what was sung, checking and saving, and so on), that step's % and the time left. Each step gets a share of the bar sized by its estimate, from the song's length and this PC's measured speed. On an RTX 3070 a 3.6-minute song takes about 26 s, plus about 9 s the first time to start the worker and load the models. The **Align** column shows the current song's progress (⟳ 42%).
+
+**Icons:** ⚡ marks everything done on the GPU: ⚡✓ re-timed, ⚡– kept as found, ⚡✗ error. ✎ marks lyrics or timing you set yourself in the player.
+
 **If the aligner fails** (for example the GPU runs out of memory, the add-on is damaged, or the GPU can't be found), alignment pauses and a window explains the error. Finding carries on, and songs that need aligning keep queueing. The song that failed keeps its found lyrics. Choose:
 - **Ignore and keep aligning:** skip that song, restart the aligner, and work through the queue.
 - **Stop using alignment:** switch the option off. Finding carries on, and queued songs keep their found lyrics.
@@ -180,7 +184,9 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 
 If 3 songs in a row fail on their own (unreadable files, say), the same window appears.
 
-Songs are aligned only once for the same lyrics. To align particular songs regardless of their scores, select them and use **right-click → Align on the GPU**. **Stop** stops the alignment after the current song.
+Songs are aligned only once for the same lyrics. To align particular songs regardless of their scores, select them and use **right-click → ⚡ Align on the GPU**. This aligns them again even if they were aligned before, starting from the original timing. Songs with your own choice are skipped, and the log says so.
+
+If the GPU worker crashes or stops answering, it is restarted and the song is tried once more before alignment pauses. **Stop** stops the alignment after the current song.
 
 ## Cleaning up lyrics
 

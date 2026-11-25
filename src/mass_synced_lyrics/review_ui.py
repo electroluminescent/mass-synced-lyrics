@@ -40,12 +40,15 @@ WINDOW = 8.0           # seconds shown in the scrolling waveform
 ANIM = 0.2             # seconds for eased scrolling / scrubbing
 TICK_MS = 20
 
+GPU = "⚡"                 # marks everything done on the NVIDIA GPU (aligning by ear)
+HAND = "✎"                # marks timing or lyrics you set yourself in the player
+
 SHORT_STATUS = {
     "proposed": "Found", "embedded": "Saved", "lrc_written": ".lrc saved", "already_embedded": "Up to date",
     "has_synced": "Has lyrics", "not_found": "Not found", "no_synced": "Plain only online",
     "instrumental": "Instrumental", "no_metadata": "No tags", "ambiguous": "Ambiguous", "error": "Error",
     "unsupported": "Unsupported", "locked": "Your choice", "chosen": "Your choice", "unchanged": "Unchanged",
-    "rejected": "Rejected", "restored": "Restored", "aligned": "Aligned", "searching": "Looking up…", "": "",
+    "rejected": "Rejected", "restored": "Restored", "aligned": GPU + " Aligned", "searching": "Looking up…", "": "",
 }
 CHOICE_TEXT = {"local": "Local", "online": "Online", "keep": "Don't change", "custom": "Custom",
                "remove": "Remove lyrics", "": ""}
@@ -77,14 +80,16 @@ COLUMN_HINTS = {
           "spread over the song and, once the audio has been checked, lines that start on silence. "
           "Click the header to filter by it.",
     "find": "Find lyrics: ⟳ being looked up now · ✓ done · ✗ error.",
-    "align": "GPU alignment: ⟳ aligning now · ✓ re-timed · – heard too little, kept as found · ✗ error.",
+    "align": "Alignment. ⚡ = on the GPU: ⟳ 42% aligning now · ⚡✓ re-timed · ⚡– heard too little, kept as found · "
+             "⚡✗ error. ✎ = timing or lyrics you set yourself in the player.",
     "save": "Saving (Apply / Save now): ⟳ writing now · ✓ written · – already up to date · ✗ error.",
 }
-COLUMNS = (("status", 70, "Status"), ("find", 40, "Find"), ("align", 44, "Align"), ("save", 40, "Save"),
+COLUMNS = (("status", 70, "Status"), ("find", 40, "Find"), ("align", 60, "Align"), ("save", 40, "Save"),
            ("choice", 96, "Choice ⟳"), ("match", 56, "Match"), ("fit", 48, "Fit"),
            ("local", 58, "Local"), ("online", 66, "Online"))
 OPS = ("find", "align", "save")
 OP_MARK = {"busy": "⟳", "done": "✓", "skip": "–", "fail": "✗", "": ""}
+ALIGN_MARK = {"busy": "⟳", "done": GPU + "✓", "skip": GPU + "–", "fail": GPU + "✗", "": ""}
 
 VIEWS = {"artist": "Artist ▸ Album", "folder": "Folders"}
 VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ Song"}
@@ -162,6 +167,11 @@ def heard_color(p: float) -> str:
     p = max(0.0, min(1.0, float(p or 0.0)))
     lo, hi = _hex_rgb(HEARD_LO), _hex_rgb(HEARD_HI)
     return "#%02x%02x%02x" % tuple(int(a + (b - a) * p) for a, b in zip(lo, hi))
+
+
+def _fmt_left(sec: float) -> str:
+    sec = int(round(max(0.0, sec)))
+    return f"{sec // 60}:{sec % 60:02d}" if sec >= 60 else f"{sec} s"
 
 
 def resize_lyric(times: list, texts: list, idx: int, edge: str, t: float, duration: float) -> dict:
@@ -442,11 +452,11 @@ class ReviewTab(ttk.Frame):
         bf.pack(fill="x")
         theme.hint(ttk.Button(bf, text="Load earlier results", command=self.load_earlier), 'Add every song from earlier runs to the list.').pack(side="left")
         theme.hint(ttk.Button(bf, text="Open file…", command=self._open_file), 'Open any song in the player.').pack(side="left", padx=6)
-        mb = ttk.Menubutton(bf, text="Align (GPU)")
+        mb = ttk.Menubutton(bf, text=GPU + " Align (GPU)")
         menu = theme.register(tk.Menu(mb, tearoff=0), "menu")
-        menu.add_command(label="Align low-confidence songs in the list",
+        menu.add_command(label=GPU + " Align low-confidence songs in the list",
                          command=lambda: self.app.align_command("low"))
-        menu.add_command(label="Align selected songs", command=lambda: self.app.align_command("selected"))
+        menu.add_command(label=GPU + " Align selected songs", command=lambda: self.app.align_command("selected"))
         mb["menu"] = menu
         theme.hint(mb, "Align lyrics to the vocals on the NVIDIA GPU: the low-confidence songs in this list, or the "
                        "selected songs. Progress shows at the top of the window.").pack(side="left")
@@ -529,7 +539,7 @@ class ReviewTab(ttk.Frame):
         theme.hint(ttk.Button(tm, text="Stretch to song length", command=self._stretch_to_length), "Scale the timing by this song's length ÷ the length of the version the lyrics were made for (from LRCLIB or the [length:] tag; asks if unknown).").pack(side="left")
         tm2 = ttk.Frame(tcard, style=cs)
         tm2.pack(fill="x", pady=(8, 0))
-        theme.hint(ttk.Button(tm2, text="Line to playhead", command=self._align), "Align the selected line to the playhead: click a line in New, play to where it's actually sung, then press. One aligned line sets the offset, two set offset and stretch.").pack(side="left", padx=(0, 6))
+        theme.hint(ttk.Button(tm2, text=HAND + " Line to playhead", command=self._align), "Align the selected line to the playhead: click a line in New, play to where it's actually sung, then press. One aligned line sets the offset, two set offset and stretch.").pack(side="left", padx=(0, 6))
         self.btn_interp = theme.flat_button(tm2, "Interpolate", self._toggle_interpolate, padx=10)
         theme.hint(self.btn_interp, "Re-time every line you haven't pinned or edited by stretching the original "
                                     "timing between your pins. Updates live as you add pins; click again to turn off.")
@@ -538,18 +548,18 @@ class ReviewTab(ttk.Frame):
         theme.hint(ttk.Button(tm2, text="Clear edits", command=self.clear_edits), 'Reset every edited time (yours and the aligner\'s) back to the computed timing.').pack(side="left", padx=(4, 0))
         self.v_pins = tk.StringVar()
         tm3 = tm2
-        self.btn_ai = theme.hint(ttk.Button(tm3, text="Auto-align (GPU)", command=self.auto_align),
-                                 "Locate these lyrics in this song's vocals on the NVIDIA GPU. The words it hears are "
-                                 "drawn in purple under the waveforms (brighter = more sure). If enough of them are "
-                                 "heard (Aligned lyrics must match, Find lyrics tab), the lines it placed get those "
-                                 "times (purple) and the others follow. Undo with Clear edited times.")
-        self.btn_ai.pack(side="left", padx=(10, 0))
+        self.btn_ai = theme.hint(ttk.Button(tm3, text=GPU + " Auto-align (GPU)", command=self.auto_align),
+                                 "Locate these lyrics in this song's vocals on the NVIDIA GPU (⚡). If enough lyric words "
+                                 "are heard being sung (Aligned lyrics must match, Find lyrics tab), the lines it placed "
+                                 "get those times and show in the Edited lane (purple, brighter = more sure); the others "
+                                 "follow. Progress shows here and at the top. Undo with Clear edits.")
+        self.btn_ai.pack(side="left", padx=(6, 0))
         self.v_ripple = tk.BooleanVar(value=bool(getattr(self.app.settings, "ripple", False)))
         theme.hint(ttk.Checkbutton(tm3, text="Ripple changes", variable=self.v_ripple, command=self._ripple_toggled,
                                    style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"),
                    "When a time is edited (by you or the aligner), move the lines around it too: lines between "
                    "two pinned or edited lines are stretched to fit, and lines before the first / after the last "
-                   "move by the same amount, squeezed so they stay within the song.").pack(side="left", padx=(8, 0))
+                   "move by the same amount, squeezed so they stay within the song.").pack(side="left", padx=(6, 0))
         ttk.Label(tm2, textvariable=self.v_pins, style="Muted.TLabel").pack(side="left", padx=8)
         self.v_ai_note = tk.StringVar()
         note = ttk.Label(tcard, textvariable=self.v_ai_note, style="Muted.TLabel", wraplength=700, justify="left")
@@ -1008,7 +1018,27 @@ class ReviewTab(ttk.Frame):
                 "choice": f"⟳ {choice}" if choice else "", "match": match, "fit": fitv}
         for op in OPS:
             vals[op] = OP_MARK.get(r.get("op_" + op, ""), "")
+        st = r.get("op_align", "")
+        vals["align"] = (f"⟳ {r['align_pct']:.0f}%" if st == "busy" and r.get("align_pct") is not None
+                         else ALIGN_MARK.get(st, ""))
+        if r.get("choice") == "custom":
+            vals["align"] += HAND
+        elif not st and r.get("status") == "aligned":
+            vals["align"] = ALIGN_MARK["done"]
         return tuple(vals[c] for c, _, _ in COLUMNS)
+
+    def set_align_pct(self, path: str, pct: float | None) -> None:
+        """Show how far the GPU is with this song in its Align cell (cheap: one cell)."""
+        key = state_key(path)
+        r = self.rows.get(key)
+        if r is None:
+            return
+        r["align_pct"] = pct
+        if key in self._shown and r.get("op_align") == "busy":
+            try:
+                self.tree.set(key, "align", "⟳" if pct is None else f"⟳ {pct:.0f}%")
+            except tk.TclError:
+                pass
 
     @staticmethod
     def _by_choice(r: dict, prefix: str) -> float | None:
@@ -1460,8 +1490,9 @@ class ReviewTab(ttk.Frame):
         m.add_command(label="Use Online lyrics", command=lambda: self.set_many(songs, "online"))
         m.add_command(label="Don't change", command=lambda: self.set_many(songs, "keep"))
         m.add_command(label="Reset to default", command=lambda: self.reset_many(songs))
-        if getattr(self.app.settings, "ai_align", False) and hasattr(self.app, "align_paths"):
-            m.add_command(label=f"Align on the GPU ({what})", command=lambda: self.app.align_paths(songs))
+        if hasattr(self.app, "align_command"):
+            m.add_command(label=f"{GPU} Align on the GPU ({what})",
+                          command=lambda: self.app.align_command("songs", songs))
         m.add_separator()
         m.add_command(label=f"Restore original lyrics ({what})…", command=lambda: self.app.restore_paths(songs))
         m.add_separator()
@@ -1753,8 +1784,8 @@ class ReviewTab(ttk.Frame):
                      empty="(no .lrc file yet)" if lrc_mode else "(no embedded lyrics)")
         self.cands = list(info.candidates)
         self.heard_by_cand = {}
-        self._align_req = None
         self.v_ai_note.set("")
+        self._ai_button()
         self._attach_alignment(info)
         self._fill_candidates()
         prefs = info.prefs or {}
@@ -2351,17 +2382,47 @@ class ReviewTab(ttk.Frame):
         svc = app._align_service()
         if svc.paused:
             self.v_ai_note.set("Waiting — aligning is paused (see the message)")
+        elif svc.busy:
+            self.v_ai_note.set("Waiting for the GPU to finish the song it's on…")
         else:
-            self.v_ai_note.set("Aligning on the GPU… (the first time also loads the models)")
-        self.btn_ai.config(state="disabled")
-        app.activity.set("autoalign", "Auto-align (GPU)", None,
+            self.v_ai_note.set("Starting…")
+        self._ai_button()
+        app.activity.set("autoalign", GPU + " Auto-align", None,
                          detail=os.path.basename(display_path(self.song.path)), stop=self.cancel_auto_align)
-        svc.request_raw(self.song.path, [b for _, b in items], items[0][0], self._align_req)
+        svc.request_raw(self.song.path, [b for _, b in items], items[0][0], self._align_req,
+                        duration=self._duration() or None)
+        app._align_tick()
+
+    def _ai_button(self, pct: float | None = None) -> None:
+        """Auto-align is busy only for the song its request is for; any other song can be aligned."""
+        mine = self._align_req is not None and self.song is not None and self._align_req[0] == self.song.path
+        try:
+            if mine:
+                self.btn_ai.config(state="disabled",
+                                   text=f"{GPU} Aligning… {pct:.0f}%" if pct is not None else f"{GPU} Aligning…")
+            else:
+                self.btn_ai.config(state="normal", text=GPU + " Auto-align (GPU)")
+        except tk.TclError:
+            pass
+
+    def auto_align_progress(self, snap: dict | None, waiting: bool) -> None:
+        """Called by the app a few times a second while this song's Auto-align request is pending."""
+        mine = self._align_req is not None and self.song is not None and self._align_req[0] == self.song.path
+        if not mine:
+            return
+        if snap is None:
+            self._ai_button()
+            if waiting:
+                self.v_ai_note.set("Waiting for the GPU to finish the song it's on…")
+            return
+        pct = snap["frac"] * 100
+        self._ai_button(pct)
+        self.v_ai_note.set(f"{snap['label']} ({snap['stage_frac'] * 100:.0f}%) · about {_fmt_left(snap['left'])} left")
 
     def cancel_auto_align(self) -> None:
         """Forget the pending Auto-align request (its answer is ignored when it arrives)."""
         self._align_req = None
-        self.btn_ai.config(state="normal")
+        self._ai_button()
         self.v_ai_note.set("Auto-align cancelled.")
         self.app.activity.done("autoalign")
 
@@ -2372,8 +2433,10 @@ class ReviewTab(ttk.Frame):
         if e.get("token") != self._align_req:
             return
         self._align_req = None
-        self.btn_ai.config(state="normal")
+        self._ai_button()
         if self.song is None or self.cand is None or e.get("path") != self.song.path:
+            self.app._log(f"Auto-align finished for {os.path.basename(display_path(e.get('path') or ''))} after you "
+                          "moved to another song: not applied. Open it and press Auto-align again.")
             return
         res = e.get("result") or {}
         if not res.get("ok"):

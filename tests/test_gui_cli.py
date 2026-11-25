@@ -723,7 +723,7 @@ def test_align_toggle_needs_nvidia_and_updates_the_list(settings, tmp_path, monk
     k = state_key(loose)
     assert app.review.rows[k]["status"] == "aligned", app.txt.get("1.0", "end")[-1500:]
     assert app.review.rows[k]["conf_online"] == 100
-    assert app.review.tree.set(k, "status") == "Aligned"
+    assert app.review.tree.set(k, "status") == "⚡ Aligned"
     assert "Aligned (100% of words heard)" in app.txt.get("1.0", "end")
     app.review.shutdown()
     app.destroy()
@@ -1164,4 +1164,59 @@ def test_align_row_finishes_when_find_ends_after_the_aligner_went_idle(settings,
     assert not app.activity.is_active("align") and app.align_service.done == 0
     app.update()
     assert "2 aligned" in app.txt.get("1.0", "end")
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_auto_align_button_belongs_to_its_song_and_shows_progress(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import ai_align
+    from mass_synced_lyrics.engine import Engine
+
+    lyr = "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    p = make_track(os.path.join(settings.music_folder, "a.flac"), "flac")
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib([record(synced=lyr)])).run()
+    app = new_app(settings)
+    rv = app.review
+    app.nb.select(rv)
+    k = state_key(p)
+    rv.add_row(k, "proposed", "lrclib", "Some Artist", "Some Song", "", "found", "online")
+    rv.player.silent_reason = "test"
+    rv.tree.selection_set(k)
+    assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
+    assert str(rv.btn_ai.cget("state")) == "normal" and "Auto-align" in rv.btn_ai.cget("text")
+    rv._align_req = (rv.song.path, "x", 1)                    # waiting for this song
+    rv._ai_button()
+    assert str(rv.btn_ai.cget("state")) == "disabled"
+    snap = {"frac": 0.42, "label": "Isolating the vocals", "stage_frac": 0.5, "left": 75}
+    rv.auto_align_progress(snap, False)
+    assert "42%" in rv.btn_ai.cget("text") and "Isolating the vocals (50%)" in rv.v_ai_note.get()
+    assert "1:15 left" in rv.v_ai_note.get()
+    rv.load_song(k)                                           # reloading keeps the request (it used to
+    tok = rv._token                                           # forget it and leave the button greyed out)
+    assert _pump(app, lambda: getattr(rv, "_loaded_token", 0) == tok)
+    assert rv._align_req is not None and str(rv.btn_ai.cget("state")) == "disabled"
+    rv._align_req = ("some other song.flac", "x", 2)          # another song is being aligned: this one can be
+    rv._ai_button()
+    assert str(rv.btn_ai.cget("state")) == "normal"
+    rv.cancel_auto_align()
+    # right-click → Align on the GPU queues the songs whatever their scores (offering to switch it on)
+    queued = []
+    monkeypatch.setattr(app, "_ensure_ai", lambda: True)
+    monkeypatch.setattr(app, "queue_alignment", lambda songs, force=False: queued.append((songs, force)) or 1)
+    app.align_command("songs", [k])
+    assert queued == [([k], True)]
+    # the Align column: GPU marks, progress while busy, and your own timing
+    rv.set_op(k, "align", "busy")
+    rv.set_align_pct(k, 37)
+    assert rv.tree.set(k, "align") == "⟳ 37%"
+    rv.set_op(k, "align", "done")
+    assert rv.tree.set(k, "align") == "⚡✓"
+    assert ai_align.STAGE_LABEL["separate"] == "Isolating the vocals"
+    rv.shutdown()
     app.destroy()

@@ -7,8 +7,12 @@ one JSON object per line on stdin/stdout.
 
 Request:  {"id": 1, "audio": "C:/music/song.flac", "lines": ["first line", ...], "probe": 12.5,
            "language": null}
+Progress: {"id": 1, "progress": "separate", "frac": 0.4}   (any number, before the response; frac may be
+          null when the step can't tell how far it is)
 Response: {"id": 1, "ok": true, "language": "en", "segments": [{"start": s, "end": e,
-           "words": [[word, start, end, probability], ...]}, ...]}
+           "words": [[word, start, end, probability], ...]}, ...],
+           "transcript": [[word, start, end, probability], ...], "duration": seconds,
+           "timings": {"decode": s, "separate": s, ...}}
           {"id": 1, "ok": false, "error": "..."}
 
 Steps per song: decode (PyAV) -> isolate the vocals (Demucs htdemucs) -> 16 kHz mono -> detect the
@@ -20,13 +24,17 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import traceback
 
 SR_WHISPER = 16000
 
 
 def _emit(obj) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    # ASCII-only JSON: the pipe's encoding can't break it. (The app starts this with python -I, which
+    # ignores PYTHONIOENCODING, so on Windows stdout would otherwise be cp1252 and a heard word such as
+    # "와" or a "♪" in the lyrics crashed the worker with UnicodeEncodeError.)
+    sys.stdout.write(json.dumps(obj, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -60,29 +68,59 @@ class Worker:
         self.separate = separate
         self._whisper = None
         self._demucs = None
+        self._req = None                  # id of the request being worked on (for progress messages)
+        self._sep_len = 0
+        self._stage = None
+        self._stage_t0 = 0.0
+        self._last_emit = 0.0
+        self.timings: dict = {}
+
+    # -- progress: one message when a step starts, then (throttled) how far it is
+    def stage(self, name: str) -> None:
+        self._end_stage()
+        self._stage, self._stage_t0, self._last_emit = name, time.monotonic(), 0.0
+        if self._req is not None:
+            _emit({"id": self._req, "progress": name, "frac": None})
+
+    def frac(self, f: float) -> None:
+        now = time.monotonic()
+        if self._req is not None and now - self._last_emit >= 0.25:
+            self._last_emit = now
+            _emit({"id": self._req, "progress": self._stage, "frac": round(max(0.0, min(1.0, f)), 3)})
+
+    def _end_stage(self) -> None:
+        if self._stage is not None:
+            self.timings[self._stage] = round(self.timings.get(self._stage, 0.0)
+                                              + time.monotonic() - self._stage_t0, 3)
+        self._stage = None
 
     # Models load on first use, so --serve starts quickly.
     @property
     def whisper(self):
         if self._whisper is None:
-            if os.environ.get("MSL_ALIGN_TEST_RANDOM"):          # tests: tiny random model, no download
-                import stable_whisper
-                import whisper
-                dims = whisper.model.ModelDimensions(n_mels=80, n_audio_ctx=1500, n_audio_state=64,
-                                                     n_audio_head=2, n_audio_layer=1, n_vocab=51865,
-                                                     n_text_ctx=448, n_text_state=64, n_text_head=2,
-                                                     n_text_layer=1)
-                m = whisper.model.Whisper(dims).to(self.device)
-                stable_whisper.modify_model(m)
-                self._whisper = m
-            else:
-                import stable_whisper
-                self._whisper = stable_whisper.load_model(self.model_name, device=self.device)
+            self.stage("load_whisper")
+            self._load_whisper()
         return self._whisper
+
+    def _load_whisper(self) -> None:
+        if os.environ.get("MSL_ALIGN_TEST_RANDOM"):          # tests: tiny random model, no download
+            import stable_whisper
+            import whisper
+            dims = whisper.model.ModelDimensions(n_mels=80, n_audio_ctx=1500, n_audio_state=64,
+                                                 n_audio_head=2, n_audio_layer=1, n_vocab=51865,
+                                                 n_text_ctx=448, n_text_state=64, n_text_head=2,
+                                                 n_text_layer=1)
+            m = whisper.model.Whisper(dims).to(self.device)
+            stable_whisper.modify_model(m)
+            self._whisper = m
+        else:
+            import stable_whisper
+            self._whisper = stable_whisper.load_model(self.model_name, device=self.device)
 
     @property
     def demucs(self):
         if self._demucs is None:
+            self.stage("load_separator")
             if os.environ.get("MSL_ALIGN_TEST_RANDOM"):
                 from demucs.htdemucs import HTDemucs
                 self._demucs = HTDemucs(sources=["drums", "bass", "other", "vocals"], channels=8, t_layers=1)
@@ -99,17 +137,48 @@ class Worker:
 
         if self.separate:
             model = self.demucs
+            self.stage("decode")
             mix = _decode(path, model.samplerate)
+            self.duration = mix.shape[-1] / model.samplerate
+            self.stage("separate")
+            self._sep_len = mix.shape[-1]
             ref = mix.mean(0)
             mean, std = ref.mean(), ref.std() + 1e-8
             with torch.no_grad():
-                out = _apply(model, ((mix - mean) / std)[None].to(self.device), self.device)
+                out = _apply(model, ((mix - mean) / std)[None].to(self.device), self.device, self._demucs_cb)
             voc = out[0, model.sources.index("vocals")] * std + mean
             mono, rate = voc.mean(0).cpu(), model.samplerate
         else:
+            self.stage("decode")
             mix = _decode(path, 44100)
+            self.duration = mix.shape[-1] / 44100
             mono, rate = mix.mean(0), 44100
         return julius.resample_frac(mono, rate, SR_WHISPER).numpy().astype("float32")
+
+    def _free(self) -> None:
+        import gc
+
+        import torch
+        gc.collect()
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+
+    def _demucs_cb(self, d: dict) -> None:
+        # demucs 4.1 calls this per chunk with the chunk's offset in samples (not the length: we know it)
+        try:
+            if d.get("state") == "end" and self._sep_len:
+                n = max(1, int(d.get("models") or 1))
+                seg = getattr(self._demucs, "segment", 7.8) * getattr(self._demucs, "samplerate", 44100)
+                part = min(1.0, (float(d.get("segment_offset") or 0) + seg) / self._sep_len)
+                self.frac((int(d.get("model_idx_in_bag") or 0) + part) / n)
+        except Exception:
+            pass
+
+    def _transcribe_cb(self, seek, total) -> None:
+        try:
+            self.frac(float(seek) / float(total or 1))
+        except Exception:
+            pass
 
     def detect_language(self, audio, probe: float) -> str:
         import torch
@@ -129,35 +198,71 @@ class Worker:
         lines = [x for x in lines if x]
         if len(lines) < 2:
             return {"ok": False, "error": "fewer than 2 lyric lines"}
+        self._req, self.timings, self.duration = req.get("id"), {}, 0.0
+        try:
+            try:
+                out = self._align(req, lines)
+            except Exception as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                self._free()                    # leftovers from the previous song: free them, try once more
+                out = self._align(req, lines)
+            self.stage("cleanup")
+            self._free()
+        finally:
+            self._end_stage()
+            self._req = None
+        out["timings"] = self.timings
+        out["duration"] = round(self.duration, 2)
+        return out
+
+    def _align(self, req: dict, lines: list) -> dict:
         audio = self.vocals_16k(req["audio"])
+        self.whisper                                  # loads the speech model the first time (its own step)
+        self.stage("language")
         lang = req.get("language") or self.detect_language(audio, float(req.get("probe") or 0))
+        self.stage("align")
         result = self.whisper.align(audio, "\n".join(lines), language=lang, original_split=True,
                                     failure_threshold=0.5, verbose=None)
-        if result is None:
-            return {"ok": False, "error": "alignment failed (too many words could not be placed)",
-                    "language": lang}
         segs = []
-        for s in result.segments:
+        for s in (result.segments if result is not None else []):
             segs.append({"start": float(s.start), "end": float(s.end),
                          "words": [[w.word, float(w.start), float(w.end), float(w.probability or 0.0)]
                                    for w in (s.words or [])]})
         out = {"ok": True, "language": lang, "segments": segs}
+        if result is None:
+            # Forced alignment gave up (over half the words couldn't be placed in order — typical of live
+            # recordings with talk or a different arrangement). What was sung can still be matched.
+            out["forced_error"] = "forced alignment gave up (too many words could not be placed in order)"
+            if not req.get("transcribe", True):
+                return {"ok": False, "error": out["forced_error"], "language": lang}
         if req.get("transcribe", True):
             # What was actually sung or said, word by word: lets the app tell the lyrics apart from
             # ad-libs and talk (live recordings), which forced alignment alone can't.
+            self.stage("transcribe")
             try:
+                # temperature 0 only: no slow re-decoding of hard passages (that made this step take 10 s
+                # one time and 25 s the next on the same song); stray words are skipped when matching anyway.
                 tr = self.whisper.transcribe(audio, language=lang, word_timestamps=True, regroup=False,
-                                             condition_on_previous_text=False, verbose=None)
+                                             condition_on_previous_text=False, verbose=None, temperature=0.0,
+                                             progress_callback=self._transcribe_cb)
                 out["transcript"] = [[w.word, float(w.start), float(w.end), float(w.probability or 0.0)]
                                      for seg in tr.segments for w in (seg.words or [])]
             except Exception as e:                  # the alignment is still usable without it
                 out["transcript_error"] = f"{type(e).__name__}: {e}"
+            if result is None and not out.get("transcript"):
+                return {"ok": False, "error": out["forced_error"], "language": lang}
         return out
 
 
-def _apply(model, mix, device):
+def _apply(model, mix, device, callback=None):
+    import inspect
+
     from demucs.apply import apply_model
-    return apply_model(model, mix, device=device, split=True, overlap=0.1, progress=False)
+    kw = {}
+    if callback is not None and "callback" in inspect.signature(apply_model).parameters:
+        kw["callback"] = callback                     # demucs 4.1: called per chunk, for progress
+    return apply_model(model, mix, device=device, split=True, overlap=0.1, progress=False, **kw)
 
 
 def check() -> dict:
@@ -183,6 +288,11 @@ def check() -> dict:
 
 
 def serve(argv: list[str]) -> None:
+    for stream in (sys.stdin, sys.stdout):              # the app speaks UTF-8 whatever the locale
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     model = argv[argv.index("--model") + 1] if "--model" in argv else "medium"
     device = argv[argv.index("--device") + 1] if "--device" in argv else "cuda"
     try:

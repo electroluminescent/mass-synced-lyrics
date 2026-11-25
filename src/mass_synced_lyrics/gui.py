@@ -15,6 +15,7 @@ from . import APP_TITLE, DEFAULT_ACOUSTID_KEY, __version__, theme
 from .config import Settings, load_settings, save_settings, snap5
 from .engine import STATUS_LABELS, Engine, display_path
 from .paths import state_key
+from .review_ui import GPU, _fmt_left
 
 SESSION_MODES = [("ask", "Ask whether to load the last session"), ("load", "Load the last session"),
                  ("fresh", "Start with an empty list")]
@@ -268,7 +269,7 @@ class App(tk.Tk):
         self.btn_start.pack(side="left")
         self.btn_stop = theme.hint(ttk.Button(top, text="Stop", command=self._stop, state="disabled"), 'Stop after the current song. Run Find lyrics again to continue where it stopped.')
         self.btn_stop.pack(side="left", padx=8)
-        theme.hint(ttk.Button(top, text="Align low-confidence (GPU)", command=lambda: self.align_command("low")),
+        theme.hint(ttk.Button(top, text=GPU + " Align low-confidence (GPU)", command=lambda: self.align_command("low")),
                    "Align the songs in the list that are below High confidence or Good fit on the NVIDIA GPU "
                    "(switches the option on if needed). Progress shows at the top of the window.").pack(side="left")
         theme.hint(ttk.Button(top, text="Open logs folder", command=self._open_logs), 'Open the folder with the CSV logs of every run and apply.').pack(side="right")
@@ -727,6 +728,8 @@ class App(tk.Tk):
                           " — keeps its found lyrics")
             elif e["status"] == "error":
                 self._log(f"Align error: {name} — {e['reason']} — keeps its found lyrics")
+            elif e.get("reason"):
+                self._log(f"Not aligned: {name} — {e['reason']}")
             if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > 1.5:
                 self.refresh_apply_bar(background=True)
             return
@@ -1171,22 +1174,79 @@ class App(tk.Tk):
         finding = bool(self.worker and self.worker.is_alive())
         waiting = svc.pending()
         busy, paused = bool(getattr(svc, "busy", False)), bool(getattr(svc, "paused", False))
-        total = svc.done + waiting + (1 if busy else 0)
+        cur = getattr(svc, "current", None)
+        song = cur is not None and cur.kind == "song"
+        total = svc.done + waiting + (1 if song else 0)
         if not total and not paused:
             if finding:
-                self.activity.set("align", "Aligning on the GPU", None, detail="waiting for songs…",
+                self.activity.set("align", GPU + " Aligning on the GPU", None, detail="waiting for songs…",
                                   stop=self._align_stop)
-            else:
+            elif not busy:
                 self.activity.done("align")
             return
-        detail = f"{svc.done} of {total}" + (" · paused" if paused else "")
-        if not paused and not waiting and not busy:
-            if not finding:
+        if not paused and not waiting and not song:
+            if not finding and not busy:
                 self._align_finish_if_idle()
                 return
-            detail = f"{svc.done} done · waiting for songs from Find…"
-        self.activity.set("align", "Aligning on the GPU", svc.done, max(1, total), detail=detail,
+            if not busy:
+                self.activity.set("align", GPU + " Aligning on the GPU", svc.done, max(1, total),
+                                  detail=f"{svc.done} done · waiting for songs from Find…", stop=self._align_stop)
+                return
+        value, detail = float(svc.done), f"{svc.done} of {total}"
+        if song:
+            snap = cur.snapshot()
+            value += snap["frac"]
+            left = snap["left"] + waiting * cur.song_estimate()
+            detail = (f"Song {svc.done + 1} of {total} · {snap['label']} {snap['stage_frac'] * 100:.0f}% · "
+                      f"~{_fmt_left(left)} left")
+            self.review.set_align_pct(cur.path, snap["frac"] * 100)
+        if paused:
+            detail = f"{svc.done} of {total} · paused"
+        self.activity.set("align", GPU + " Aligning on the GPU", value, max(1, total), detail=detail,
                           stop=self._align_stop)
+
+    def destroy(self) -> None:
+        job = getattr(self, "_align_tick_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._align_tick_job = None
+        super().destroy()
+
+    def _align_tick(self) -> None:
+        """Refresh the GPU progress a few times a second while something is being aligned."""
+        if getattr(self, "_align_tick_job", None) is not None:
+            return
+        self._align_tick_job = self.after(250, self._align_tick_run)
+
+    def _align_tick_run(self) -> None:
+        self._align_tick_job = None
+        svc = self._align_service(create=False)
+        req = self.review._align_req
+        if svc is None:
+            if req is not None:
+                self.review.cancel_auto_align()
+            return
+        cur = getattr(svc, "current", None)
+        try:
+            if cur is not None and cur.kind == "song" or svc.pending():
+                self._align_activity()
+            if req is not None:
+                if cur is not None and cur.kind == "raw" and svc.current_token == req:
+                    snap = cur.snapshot()
+                    self.activity.set("autoalign", value=snap["frac"] * 100, maximum=100,
+                                      detail=f"{snap['label']} {snap['stage_frac'] * 100:.0f}% · "
+                                             f"~{_fmt_left(snap['left'])} left")
+                    self.review.auto_align_progress(snap, False)
+                else:
+                    self.activity.set("autoalign", detail="waiting for the GPU…" if svc.busy else "starting…")
+                    self.review.auto_align_progress(None, svc.busy)
+        except tk.TclError:
+            return
+        if req is not None or cur is not None or svc.pending():
+            self._align_tick()
 
     def _align_finish_if_idle(self) -> None:
         """Find is over and the aligner has nothing left: report and remove its progress row (it used to
@@ -1242,19 +1302,21 @@ class App(tk.Tk):
         self._ai_toggled()
         return bool(self.settings.ai_align)
 
-    def align_command(self, which: str) -> None:
+    def align_command(self, which: str, songs: list[str] | None = None) -> None:
         """The Align (GPU) buttons: "low" = the low-confidence songs in the list, "selected" = the
-        songs selected in Review & player."""
+        songs selected in Review & player, "songs" = these songs (right-click → Align on the GPU)."""
         from . import ai_align
 
         if not self._ensure_ai():
             return
-        if which == "selected":
-            songs = self.review.selected_songs()
+        if which in ("selected", "songs"):
+            songs = list(songs) if which == "songs" and songs else self.review.selected_songs()
             if not songs:
                 messagebox.showinfo(APP_TITLE, "Select songs in the Review & player list first.")
                 return
             n = self.queue_alignment(songs, force=True)
+            if n < len(songs):
+                self._log(f"Align: {len(songs) - n} of the {len(songs)} song(s) were already waiting.")
         else:
             paths = ai_align.pick_low_confidence(self.settings, self._session_paths())
             if not paths:
@@ -1283,6 +1345,7 @@ class App(tk.Tk):
                                None if state_key(e["path"]) in self.review.rows else "searching")
         elif t == "align_song_start":
             self.review.set_op(e["path"], "align", "busy")
+            self._align_tick()
         elif t in ("apply_file_start", "restore_file_start"):
             self.review.set_op(e["path"], "save", "busy")
         elif t == "align_raw":

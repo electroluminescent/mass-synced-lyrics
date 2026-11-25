@@ -174,7 +174,7 @@ def test_service_pauses_on_failure_queues_and_resumes(settings, monkeypatch, tmp
 
     def factory(s):
         starts.append(1)
-        if len(starts) == 1:                     # the first worker can't start (e.g. no CUDA)
+        if len(starts) <= 2:                     # the worker can't start, nor on the retry (e.g. no CUDA)
             return ai_align.Aligner(command=[sys.executable, "-c",
                                              "print('{\"ready\": false, \"error\": \"CUDA error: out of memory\"}')"])
         return ai_align.Aligner(command=fake_cmd())
@@ -320,3 +320,132 @@ def test_match_transcript_skips_adlibs():
 def test_insert_blank_lines_keeps_time_order():
     out = lrc.insert_blank_lines("[00:01.00]a\n[00:05.00]b\n", [3.0, 9.0])
     assert out == "[00:01.00]a\n[00:03.00]\n[00:05.00]b\n[00:09.00]\n"
+
+
+def test_aligner_reports_progress_steps(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    seen = []
+    al = ai_align.Aligner(command=fake_cmd())
+    res = al.align("x.flac", ["a b", "c d"], on_progress=lambda st, f: seen.append((st, f)))
+    assert res["ok"] and al.loaded
+    assert seen[0] == ("start", None) and ("separate", 0.5) in seen and seen[-1][0] == "cleanup"
+    seen.clear()
+    al.align("x.flac", ["a b", "c d"], on_progress=lambda st, f: seen.append((st, f)))
+    assert seen[0][0] == "decode"                                 # running already: no start step
+    al.close()
+
+
+def test_song_progress_shares_the_bar_by_estimates(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "_cost_cache", None)
+    now = [100.0]
+    cold = ai_align.SongProgress("a", 240, warm=False, running=False, clock=lambda: now[0])
+    warm = ai_align.SongProgress("a", 240, warm=True, running=True, clock=lambda: now[0])
+    assert cold.plan[0] == "start" and "load_whisper" in cold.plan
+    assert "start" not in warm.plan and "load_whisper" not in warm.plan
+    assert cold.snapshot()["left"] > warm.snapshot()["left"] + 8           # loading the models costs time
+    # a longer song is estimated to take longer
+    long_ = ai_align.SongProgress("b", 600, warm=True, running=True, clock=lambda: now[0])
+    assert long_.snapshot()["left"] > warm.snapshot()["left"]
+    # progress only moves forward, through the steps, and never claims to be done early
+    p, last = warm, -1.0
+    for stage, frac in [("decode", None), ("separate", 0.2), ("separate", 0.9), ("language", None),
+                        ("align", None), ("transcribe", 0.5), ("cleanup", None), ("check", None)]:
+        p.step(stage, frac)
+        for _ in range(3):
+            now[0] += 2.0
+            snap = p.snapshot()
+            assert last <= snap["frac"] < 1.0 and snap["label"] == ai_align.STAGE_LABEL[stage]
+            last = snap["frac"]
+    assert last > 0.85
+    times = p.finish()
+    assert p.snapshot()["frac"] == 1.0 and times["separate"] == pytest.approx(12.0)
+    # a crash and retry starts over with loading
+    q = ai_align.SongProgress("a", 240, warm=True, running=True, clock=lambda: now[0])
+    q.step("separate", 0.5)
+    q.restart()
+    assert q.plan[0] == "start" and "(retrying)" in q.snapshot()["label"]
+
+
+def test_measured_timings_replace_the_estimates(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "_cost_cache", None)
+    before = ai_align.stage_costs()["separate"]
+    for _ in range(10):
+        ai_align.learn_timings({"separate": 40.0, "load_whisper": 30.0}, 240)     # a slower GPU
+    after = ai_align.stage_costs()
+    assert after["separate"][1] > before[1] * 3 and after["load_whisper"][0] > 25
+    monkeypatch.setattr(ai_align, "_cost_cache", None)                           # read back from disk
+    assert ai_align.stage_costs()["separate"] == after["separate"]
+
+
+def test_worker_output_survives_any_text(monkeypatch):
+    import io
+    sys.path.insert(0, os.path.join(HERE, "..", "src", "mass_synced_lyrics"))
+    try:
+        import aligner_worker
+    finally:
+        sys.path.pop(0)
+    buf = io.BytesIO()
+    out = io.TextIOWrapper(buf, encoding="cp1252")            # Windows pipe under python -I
+    monkeypatch.setattr(sys, "stdout", out)
+    aligner_worker._emit({"transcript": [[" 와", 1.0, 1.2, 0.3]], "text": "♪ naïve"})
+    out.flush()
+    assert json.loads(buf.getvalue().decode("ascii"))["transcript"][0][0] == " 와"
+
+
+def test_service_retries_a_crashed_worker_and_force_realigns_from_the_original(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    monkeypatch.setenv("FAKE_CRASH_ONCE", str(tmp_path / "crashed"))
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    _find(settings, [record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, lambda s: ai_align.Aligner(command=fake_cmd()))
+    svc.submit([p])
+    assert _wait(lambda: any(e.get("status") == "aligned" for e in events))
+    assert os.path.exists(tmp_path / "crashed") and not svc.paused            # crashed once, retried, fine
+    assert not any(e["type"] == "align_error" for e in events) and svc.current is None
+    # asked again for this song (right-click): it is aligned again from the original timing, not skipped
+    monkeypatch.setenv("FAKE_START", "3.0")
+    svc._aligner.close()
+    svc._aligner = None                                       # fresh worker reads the new env
+    events.clear()
+    svc.submit([p], force=True)
+    assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
+    ev = next(e for e in events if e.get("type") == "align_progress")
+    assert ev["status"] == "aligned" and ev["reason"] not in ("aligned before", "already aligned")
+    st = State(settings.resolved_state_db())
+    try:
+        assert [t for t, _ in lrc.display_lines(st.get_pending(p)[2])] == [3.0, 6.0, 9.0]
+        assert lrc.same_lyrics(st.get_candidates(p)["online-original"][1], LYR)     # still the original
+        assert st.get_pending(p)[1].count("aligned") == 1
+    finally:
+        st.close()
+    svc.stop()
+    svc.join(5)
+
+
+def test_stop_answers_waiting_player_requests(settings, monkeypatch, tmp_path):
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, lambda s: ai_align.Aligner(command=fake_cmd()))
+    svc.paused = True                                          # e.g. waiting on an error
+    svc.request_raw("x.flac", ["a", "b"], 0.0, "tok")
+    assert svc.raw_waiting("tok") and svc.pending() == 0
+    svc.stop()
+    svc.join(5)
+    raw = [e for e in events if e["type"] == "align_raw"]
+    assert raw and raw[0]["token"] == "tok" and not raw[0]["result"]["ok"]
+
+
+def test_songs_with_your_own_choice_say_why_they_are_skipped(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    p = make_track(os.path.join(settings.music_folder, "b.flac"), "flac", title="Other Tune")
+    _find(settings, [record(title="Other Tune (Live)", synced=LYR, duration=12)])
+    st = State(settings.resolved_state_db())
+    st.set_override(p, "keep")
+    al = ai_align.Aligner(command=fake_cmd())
+    ev = ai_align.align_one(settings, p, al, st, 70, force=True)
+    st.close()
+    al.close()
+    assert ev["status"] == "skipped" and "your own choice" in ev["reason"]

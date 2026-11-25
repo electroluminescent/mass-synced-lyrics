@@ -302,9 +302,10 @@ class State:
                 "ends": {k: float(v) for k, v in ends.items()}, "confs": {k: float(v) for k, v in confs.items()}}
 
     def use_aligned(self, path: str, kind: str, old_text: str, new_text: str, label: str,
-                    confidence: float | None, fit: float | None) -> bool:
+                    confidence: float | None, fit: float | None, base: str | None = None) -> bool:
         """Swap the found lyrics of `kind` (and the proposal, if it is still those lyrics) for the
-        re-timed version; the original timing is kept as candidate '<kind>-original'."""
+        re-timed version; the original timing is kept as candidate '<kind>-original'. base: the timing
+        the aligner started from when it isn't old_text (aligning again from the original)."""
         from .lrc import same_lyrics
         path = _k(path)
         cands = self.get_candidates(path)
@@ -314,7 +315,9 @@ class State:
         if kind in cands and same_lyrics(cands[kind][1], old_text):
             olabel, otext, olrc, olen = cands[kind]
             oc = self.candidate_scores(path).get(kind, (None, None))
-            self.set_candidate(path, kind + "-original", olabel, otext, olrc, olen, oc[0], oc[1])
+            orig = cands.get(kind + "-original")
+            if base is None or same_lyrics(base, old_text) or orig is None or not same_lyrics(orig[1], base):
+                self.set_candidate(path, kind + "-original", olabel, otext, olrc, olen, oc[0], oc[1])
             self.set_candidate(path, kind, label, new_text, olrc, olen, confidence, fit)
         self.db.execute("UPDATE pending SET text=?, label=?, confidence=?, fit=?, updated=? WHERE path=?",
                         (new_text, label, _f(confidence), _f(fit), time.time(), path))
