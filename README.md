@@ -113,6 +113,29 @@ Pins, edits and checkpoints are saved per song.
 
 On Windows, sound is played through the default output device. Without an output device, playback still runs silently so the waveform and lyrics keep moving.
 
+## Align low-confidence lyrics (NVIDIA GPU, optional)
+
+Off by default. Switch it on under **Scores and alignment** on the Find lyrics tab.
+- **Requirements:** an NVIDIA graphics card with its driver installed. Without one, the option can't be switched on.
+- **First use:** the app offers to install a one-time add-on into `%LOCALAPPDATA%\mass-synced-lyrics\aligner`. It needs Python 3.10–3.12 from python.org.
+  - The add-on is PyTorch with CUDA, Whisper (via stable-ts) and Demucs, about 3 GB.
+  - The speech and vocal-separation models, about 1.6 GB more, download the first time it runs.
+
+After **Find lyrics**, songs whose found lyrics are below **High confidence** or **Good fit** (and have no per-file choice) are aligned one at a time. For each song:
+1. Demucs isolates the vocals.
+2. Whisper locates each lyric word in them, with a probability for each.
+3. Lines whose words were heard clearly are placed where they were heard. The rest are interpolated between them, the same as *Interpolate from pins*.
+4. The result is **verified**: the share of the lyric's words that were clearly heard. It is kept only if it reaches **Aligned lyrics must match** (70 % by default, steps of 5 %).
+
+**If the song passes:**
+- Its found lyrics are replaced by the re-timed version, shown as **Aligned** in the list.
+- Its Match becomes at least the verify score, and its Fit is recomputed against the audio.
+- The original timing stays available in the player as **Original timing**.
+
+**If it doesn't pass,** the song keeps its found lyrics unchanged. The activity log says why.
+
+Songs are aligned only once for the same lyrics. To align particular songs regardless of their scores, select them and use **right-click → Align on the GPU**. **Stop** stops the alignment after the current song.
+
 ## Cleaning up lyrics
 
 Two options on the Find lyrics tab tidy every lyric the app writes. Both are off by default.

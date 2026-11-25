@@ -22,7 +22,7 @@ from .state import KEEP, State
 FILTERS = {
     "All": None,
     "Needs attention": {"ambiguous", "not_found", "no_synced", "no_metadata", "error", "rejected", "unsupported"},
-    "Found (to apply)": {"proposed", "chosen", "locked"},
+    "Found (to apply)": {"proposed", "chosen", "locked", "aligned"},
     "Saved": {"embedded", "lrc_written", "already_embedded", "unchanged"},
     "Changed": {"embedded", "lrc_written", "locked", "chosen"},
     "Per-file choices": {"locked", "chosen"},
@@ -45,7 +45,7 @@ SHORT_STATUS = {
     "has_synced": "Has lyrics", "not_found": "Not found", "no_synced": "Plain only online",
     "instrumental": "Instrumental", "no_metadata": "No tags", "ambiguous": "Ambiguous", "error": "Error",
     "unsupported": "Unsupported", "locked": "Your choice", "chosen": "Your choice", "unchanged": "Unchanged",
-    "rejected": "Rejected", "restored": "Restored", "": "",
+    "rejected": "Rejected", "restored": "Restored", "aligned": "Aligned", "": "",
 }
 CHOICE_TEXT = {"local": "Local", "online": "Online", "keep": "Don't change", "custom": "Custom",
                "remove": "Remove lyrics", "": ""}
@@ -84,7 +84,7 @@ VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ So
 ROW_KEYS = ("status", "source", "artist", "title", "local", "online", "choice", "album", "conf_local",
             "conf_online", "fit_local", "fit_online")
 SCORE_COLS = {"match": ("Match", "list_min_match"), "fit": ("Fit", "list_min_fit")}
-FOUND_STATUSES = {"proposed", "chosen", "locked"}
+FOUND_STATUSES = {"proposed", "chosen", "locked", "aligned"}
 
 
 RULER_H = 16
@@ -1124,6 +1124,8 @@ class ReviewTab(ttk.Frame):
         m.add_command(label="Use Online lyrics", command=lambda: self.set_many(songs, "online"))
         m.add_command(label="Don't change", command=lambda: self.set_many(songs, "keep"))
         m.add_command(label="Reset to default", command=lambda: self.reset_many(songs))
+        if getattr(self.app.settings, "ai_align", False) and hasattr(self.app, "align_paths"):
+            m.add_command(label=f"Align on the GPU ({what})", command=lambda: self.app.align_paths(songs))
         m.add_separator()
         m.add_command(label=f"Restore original lyrics ({what})…", command=lambda: self.app.restore_paths(songs))
         try:

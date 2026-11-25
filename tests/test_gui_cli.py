@@ -674,3 +674,55 @@ def test_score_levels_snap_to_5_and_change_from_the_list(settings, tmp_path, mon
     rv._score_filter_popup("match")
     rv.shutdown()
     app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_align_toggle_needs_nvidia_and_updates_the_list(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    import sys as _sys
+
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import ai_align, gui
+    from mass_synced_lyrics.engine import Engine
+
+    lyr = "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    app = new_app(settings)
+    assert not app.v_ai.get() and not app.settings.ai_align                  # off by default
+    errors = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: errors.append(a))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: None)
+    app.v_ai.set(True)
+    app._ai_toggled()
+    assert not app.v_ai.get() and errors and "NVIDIA" in errors[0][1]          # refused without a GPU
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA GeForce RTX 3070, 8192 MiB")
+    monkeypatch.setattr(ai_align, "is_installed", lambda: True)
+    app.v_ai.set(True)
+    app._ai_toggled()
+    assert app.v_ai.get() and app.settings.ai_align
+    # a find, then the low-confidence song is aligned (fake worker) and the list shows it
+    d = settings.music_folder
+    loose = make_track(os.path.join(d, "b.flac"), "flac", title="Other Tune")
+    settings.dry_run = True
+    events = []
+    Engine(settings, events.append, lrclib=FakeLrclib([record(title="Other Tune (Live)", synced=lyr,
+                                                                duration=12)])).run()
+    monkeypatch.setenv("MSL_ALIGNER_CMD", __import__("json").dumps(
+        [_sys.executable, os.path.join(os.path.dirname(__file__), "fake_aligner.py")]))
+    for e in events:
+        app._handle(e)                  # the end of Find starts aligning the low-confidence songs
+    assert app.align_worker is not None
+    for _ in range(500):
+        app.update()
+        if app.align_worker is None:
+            break
+        app.after(10)
+    k = state_key(loose)
+    assert app.review.rows[k]["status"] == "aligned", app.txt.get("1.0", "end")[-1500:]
+    assert app.review.rows[k]["conf_online"] == 100
+    assert app.review.tree.set(k, "status") == "Aligned"
+    assert "Aligned (100% of words heard)" in app.txt.get("1.0", "end")
+    app.review.shutdown()
+    app.destroy()

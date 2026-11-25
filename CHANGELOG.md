@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0
+- **Align low-confidence lyrics (NVIDIA GPU)**: an optional switch under **Scores and alignment** on
+  the Find lyrics tab, off by default.
+  - It needs an NVIDIA graphics card; without one the switch stays off. The first time, it offers to
+    install the add-on (PyTorch with CUDA, Whisper via stable-ts, and Demucs, about 3 GB) into its own
+    folder. The app itself doesn't grow.
+  - After Find, songs below High confidence or Good fit are aligned. Demucs isolates the vocals,
+    Whisper locates the lyric words, lines heard clearly are placed, and the rest are interpolated.
+  - The result is kept only if enough of the words were clearly heard: **Aligned lyrics must match**,
+    70 % by default, in steps of 5 %. Otherwise the song keeps its found lyrics.
+  - Kept results show as **Aligned**, with updated Match and Fit, and the original timing stays
+    selectable in the player.
+  - Right-click → **Align on the GPU** aligns chosen songs. **Stop** stops after the current song.
+- The score levels and the audio switches moved to a **Scores and alignment** section in the left
+  card, so the activity log keeps its space.
+
 ## 1.1.6
 - The score levels can be changed in steps of 5 %: **High confidence** (default 95 %), **Good fit**
   (default 80 %) and **Match confidence** (default 90 %) on the Find lyrics tab. Typed values snap to the

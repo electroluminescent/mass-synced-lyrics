@@ -40,7 +40,8 @@ if (-not (Test-Path "build\fpcalc.exe")) {
 $common = @("--noconfirm", "--clean", "--onefile", "--paths", "src", "--add-binary", "build\fpcalc.exe;.",
             "--icon", "src\mass_synced_lyrics\assets\icon.ico")
 # The GUI also needs the audio player stack (PyAV/FFmpeg for decoding, PortAudio via sounddevice).
-$player = @("--add-data", "src\mass_synced_lyrics\assets;mass_synced_lyrics\assets", "--collect-data", "sv_ttk",
+$player = @("--add-data", "src\mass_synced_lyrics\assets;mass_synced_lyrics\assets",
+            "--add-data", "src\mass_synced_lyrics\aligner_worker.py;mass_synced_lyrics", "--collect-data", "sv_ttk",
             "--collect-all", "av", "--collect-all", "_sounddevice_data", "--hidden-import", "sounddevice")
 & $Python -m PyInstaller @common @player --windowed --name MassSyncedLyrics launchers\gui.py
 if ($LASTEXITCODE) { throw "PyInstaller (GUI) failed" }

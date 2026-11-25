@@ -31,6 +31,14 @@ def selftest(audio_path: str, out_path: str) -> None:
         theme.apply(root, "dark")
         lines.append(f"theme: {'sun valley' if theme._state['sv'] else 'fallback (sv-ttk missing)'}")
         root.destroy()
+        import os
+
+        from mass_synced_lyrics import ai_align
+
+        if not os.path.exists(ai_align.worker_source()):
+            raise RuntimeError("aligner_worker.py is missing from the build")
+        lines.append(f"aligner worker bundled; GPU: {ai_align.nvidia_gpu() or 'no NVIDIA GPU'}; "
+                     f"add-on {'installed' if ai_align.is_installed() else 'not installed'}")
         lines.append("SELFTEST OK")
     except Exception as e:
         lines.append(f"SELFTEST FAILED: {type(e).__name__}: {e}")

@@ -53,6 +53,9 @@ class State:
             CREATE TABLE IF NOT EXISTS overrides (
                 path TEXT PRIMARY KEY, kind TEXT, text TEXT, label TEXT, updated REAL,
                 lrc_path TEXT DEFAULT '');
+            CREATE TABLE IF NOT EXISTS aligned (
+                path TEXT PRIMARY KEY, src_hash TEXT, ok INTEGER, verify REAL, reason TEXT, text TEXT,
+                confidence REAL, fit REAL, kind TEXT, updated REAL);
             CREATE TABLE IF NOT EXISTS song_prefs (
                 path TEXT PRIMARY KEY, prefs TEXT, updated REAL);
             """
@@ -252,9 +255,43 @@ class State:
         from .lrc import same_lyrics
 
         for kind, (_, t, _, _) in self.get_candidates(path).items():
-            if text and same_lyrics(t, text):
+            if text and kind in ("local", "online") and same_lyrics(t, text):
                 return kind
         return "custom" if text else "remove"
+
+    # -- GPU alignment (ai_align)
+    def get_aligned(self, path: str):
+        """(src_hash, ok, verify, reason, text, confidence, fit, kind) or None."""
+        return self.db.execute("SELECT src_hash, ok, verify, reason, text, confidence, fit, kind FROM aligned "
+                               "WHERE path=?", (_k(path),)).fetchone()
+
+    def set_aligned(self, path: str, src_hash: str, ok: bool, verify: float, reason: str, text: str = "",
+                    confidence: float | None = None, fit: float | None = None, kind: str = "") -> None:
+        self.db.execute("REPLACE INTO aligned (path, src_hash, ok, verify, reason, text, confidence, fit, kind, "
+                        "updated) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (_k(path), src_hash, 1 if ok else 0, float(verify), reason, text, _f(confidence), _f(fit),
+                         kind, time.time()))
+        self._tick()
+
+    def use_aligned(self, path: str, kind: str, old_text: str, new_text: str, label: str,
+                    confidence: float | None, fit: float | None) -> bool:
+        """Swap the found lyrics of `kind` (and the proposal, if it is still those lyrics) for the
+        re-timed version; the original timing is kept as candidate '<kind>-original'."""
+        from .lrc import same_lyrics
+        path = _k(path)
+        cands = self.get_candidates(path)
+        pend = self.get_pending(path)
+        if pend is None or not same_lyrics(pend[2], old_text):
+            return False                                  # saved or changed meanwhile: leave it
+        if kind in cands and same_lyrics(cands[kind][1], old_text):
+            olabel, otext, olrc, olen = cands[kind]
+            oc = self.candidate_scores(path).get(kind, (None, None))
+            self.set_candidate(path, kind + "-original", olabel, otext, olrc, olen, oc[0], oc[1])
+            self.set_candidate(path, kind, label, new_text, olrc, olen, confidence, fit)
+        self.db.execute("UPDATE pending SET text=?, label=?, confidence=?, fit=?, updated=? WHERE path=?",
+                        (new_text, label, _f(confidence), _f(fit), time.time(), path))
+        self._tick()
+        return True
 
     def current_choice(self, path: str) -> str:
         """What Apply will do for this file: local | online | keep | custom | remove."""

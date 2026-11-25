@@ -21,6 +21,19 @@ The Windows build bundles the following software. Each remains under its own lic
 Because mutagen is GPL-licensed, this application as a whole is distributed under
 GPL-3.0-or-later (see LICENSE).
 
+## Optional GPU add-on (Align low-confidence lyrics)
+
+Not part of the app download. When the option is switched on, the app installs these into a separate
+Python environment in `%LOCALAPPDATA%\mass-synced-lyrics\aligner` and runs them as a separate process:
+
+| Component | License | Source |
+|---|---|---|
+| PyTorch (CUDA build) | BSD-3-Clause | https://pytorch.org |
+| stable-ts | MIT | https://github.com/jianfch/stable-ts |
+| OpenAI Whisper (code and model weights) | MIT | https://github.com/openai/whisper |
+| Demucs (code and htdemucs weights) | MIT | https://github.com/adefossez/demucs |
+| julius, PyAV, NumPy | MIT / BSD-3-Clause / BSD-3-Clause | PyPI |
+
 ## Online services
 
 - **LRCLIB** (https://lrclib.net): a free, community lyrics database. Lyrics are user-submitted.

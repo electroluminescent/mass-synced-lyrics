@@ -43,6 +43,7 @@ STATUS_LABELS = {
     "unsupported": "Unsupported file",
     "error": "Error",
     "cached": "Skipped (done in earlier run)",
+    "aligned": "Aligned on the GPU (not written yet)",
     "locked": "Per-file choice kept",
     "proposed": "Lyrics found (not written yet)",
     "lrc_written": ".lrc saved",

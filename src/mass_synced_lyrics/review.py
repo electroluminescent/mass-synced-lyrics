@@ -68,8 +68,11 @@ def gather(path: str, settings: Settings, collection: LrcCollection | None = Non
                                    plen or (lrcmod.analyze(pend[2]).length_header or 0.0)))
         for kind, (label, text, lrc_path, length) in found.items():
             if not (pend and lrcmod.same_lyrics(text, pend[2])):
-                cands.append(Candidate(f"found-{kind}", f"Found ({kind}): {label}", text,
-                                       "lrclib" if kind == "online" else "local .lrc", lrc_path, length))
+                base = kind.replace("-original", "")
+                title = f"Original timing ({base}): {label}" if kind.endswith("-original") else \
+                    f"Found ({kind}): {label}"
+                cands.append(Candidate(f"found-{kind}", title, text,
+                                       "lrclib" if base == "online" else "local .lrc", lrc_path, length))
         cands += sidecar_candidates(path, meta)
         if collection is not None and len(collection) and meta.title:
             hit, _ = collection.find(meta.title, meta.artist, dur, settings.match_threshold)

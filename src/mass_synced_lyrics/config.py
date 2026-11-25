@@ -41,6 +41,9 @@ class Settings:
     hide_low_confidence: bool = False    # song list: hide songs below either level
     list_min_match: int = 0              # song list: Match column filter (hide known scores below this)
     list_min_fit: int = 0                # song list: Fit column filter
+    ai_align: bool = False               # align low-confidence lyrics on an NVIDIA GPU (optional add-on)
+    ai_align_min: int = 70               # ... keep the re-timed lyrics only when this % of words is heard
+    ai_align_model: str = "medium"       # Whisper model for the alignment
     list_view: str = "artist"            # song list: "artist" (Artist ▸ Album) or "folder" (folders on disk)
     checkpoint_seconds: float = 1.0      # review player: play ± this around a checkpoint
     loop_checkpoints: bool = False

@@ -129,6 +129,8 @@ class App(tk.Tk):
         self.v_confident = tk.IntVar()
         self.v_fit = tk.IntVar()
         self.v_fit_audio = tk.BooleanVar()
+        self.v_ai = tk.BooleanVar()
+        self.v_ai_min = tk.IntVar()
         self.v_only_found = tk.BooleanVar()
         self.v_retry = tk.BooleanVar()
         sw = "Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"
@@ -152,41 +154,78 @@ class App(tk.Tk):
         theme.hint(ttk.Checkbutton(kf, text="Show", variable=self.v_showkey,
                         command=lambda: self.ent_key.config(show="" if self.v_showkey.get() else "•")
                         ), 'Show or hide the key.').grid(row=0, column=2, padx=(8, 0))
+        # ---- left card, below the collection: score levels and the audio checks
+        ttk.Separator(lib).grid(row=8, column=0, columnspan=2, sticky="ew", pady=14)
+        ttk.Label(lib, text="Scores and alignment", style="Section.TLabel").grid(row=9, column=0, sticky="w",
+                                                                                 pady=(0, 6))
+        sc = ttk.Frame(lib, style="Card.TFrame" if theme._state["sv"] else "TFrame")
+        sc.grid(row=10, column=0, columnspan=2, sticky="ew")
+        score_items = ("thr", "conf", "fit", "aimin")
+        for i, (text, var, tip, cmd) in enumerate((
+                ("Check lyrics against the audio (slower)", self.v_fit_audio,
+                 "While finding, decode each song with found lyrics to see whether lines start on silence or run "
+                 "into the silence at the end; this sharpens the Fit score. Songs opened in the player are always "
+                 "checked.", None),
+                ("Align low-confidence lyrics (NVIDIA GPU)", self.v_ai,
+                 "After Find, re-time the found lyrics that are below High confidence or Good fit: the vocals are "
+                 "isolated (Demucs) and the lyric words are located in them (Whisper). Lines heard clearly are "
+                 "placed, the rest interpolated, and the result is kept only if it reaches Aligned lyrics must "
+                 "match. Needs an NVIDIA graphics card and a one-time add-on download of about 3 GB. Off by "
+                 "default.", self._ai_toggled))):
+            theme.hint(ttk.Checkbutton(lib, text=text, variable=var, style=sw, command=cmd), tip).grid(
+                row=11 + i, column=0, columnspan=2, sticky="w", pady=(6 if i == 0 else 2, 0))
         for label, widget in (("After using a sidecar .lrc", "action"), ("Match confidence (70–100)", "thr"),
                               ("High confidence (50–100)", "conf"), ("Good fit (0–100)", "fit"),
-                              ("When the app starts", "session")):
-            ttk.Label(opt, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
+                              ("Aligned lyrics must match (50–100)", "aimin"), ("When the app starts", "session")):
+            if widget in score_items:
+                host = sc
+                idx = score_items.index(widget)
+                gr, gc = idx // 2, (idx % 2) * 2
+                ttk.Label(sc, text=label).grid(row=gr, column=gc, sticky="w", pady=4, padx=(0, 10))
+            else:
+                host = opt
+                ttk.Label(opt, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
             if widget == "action":
                 self.cmb_action = theme.hint(ttk.Combobox(opt, state="readonly", values=[lbl for _, lbl in LRC_ACTIONS]), 'What happens to a sidecar .lrc after its lyrics are applied: Recycle Bin, delete, or keep. A <song>.lrc that is itself the output is never removed.')
                 self.cmb_action.grid(row=r, column=1, sticky="ew")
             elif widget == "thr":
-                sp = theme.hint(ttk.Spinbox(opt, from_=70, to=100, increment=5, textvariable=self.v_threshold,
+                sp = theme.hint(ttk.Spinbox(host, from_=70, to=100, increment=5, textvariable=self.v_threshold,
                                             width=8), 'How closely names must match for a sidecar or collection .lrc to be used automatically. Lower finds more, higher is stricter. Steps of 5%.')
-                sp.grid(row=r, column=1, sticky="w")
+                sp.grid(row=gr, column=gc + 1, sticky="w", padx=(0, 24))
                 sp.bind("<FocusOut>", lambda e: self.v_threshold.set(self._threshold_value()), add="+")
                 sp.bind("<Return>", lambda e: self.v_threshold.set(self._threshold_value()), add="+")
             elif widget == "conf":
-                sp = theme.hint(ttk.Spinbox(opt, from_=50, to=100, increment=5, textvariable=self.v_confident, width=8,
+                sp = theme.hint(ttk.Spinbox(host, from_=50, to=100, increment=5, textvariable=self.v_confident, width=8,
                                             command=self._confident_changed),
                                 "Songs whose found lyrics match at this % or better count as high confidence: "
                                 "Apply confident writes them without asking, and Hide low confidence hides the "
                                 "rest. 100% = exact title, artist, album and length.")
-                sp.grid(row=r, column=1, sticky="w")
+                sp.grid(row=gr, column=gc + 1, sticky="w", padx=(0, 24))
                 sp.bind("<FocusOut>", lambda e: self._confident_changed(), add="+")
                 sp.bind("<Return>", lambda e: self._confident_changed(), add="+")
+            elif widget == "aimin":
+                sp = theme.hint(ttk.Spinbox(host, from_=50, to=100, increment=5, textvariable=self.v_ai_min, width=8,
+                                            command=self._ai_min_changed),
+                                "After aligning, the re-timed lyrics are kept only if at least this % of their words "
+                                "were clearly heard where they are placed; otherwise the song keeps its found lyrics "
+                                "unchanged. Used by Align low-confidence lyrics. Steps of 5%.")
+                sp.grid(row=gr, column=gc + 1, sticky="w", padx=(0, 24))
+                sp.bind("<FocusOut>", lambda e: self._ai_min_changed(), add="+")
+                sp.bind("<Return>", lambda e: self._ai_min_changed(), add="+")
             elif widget == "fit":
-                sp = theme.hint(ttk.Spinbox(opt, from_=0, to=100, increment=5, textvariable=self.v_fit, width=8,
+                sp = theme.hint(ttk.Spinbox(host, from_=0, to=100, increment=5, textvariable=self.v_fit, width=8,
                                             command=self._confident_changed),
                                 "Found lyrics fit the recording well at this % or better (length, lines past the end, "
                                 "spread over the song, lines on silence). Apply confident needs both High confidence "
                                 "and Good fit; Hide low confidence hides songs below either.")
-                sp.grid(row=r, column=1, sticky="w")
+                sp.grid(row=gr, column=gc + 1, sticky="w", padx=(0, 24))
                 sp.bind("<FocusOut>", lambda e: self._confident_changed(), add="+")
                 sp.bind("<Return>", lambda e: self._confident_changed(), add="+")
             else:
                 self.cmb_session = theme.hint(ttk.Combobox(opt, state="readonly", values=[v for _, v in SESSION_MODES]), 'What to do with the last review session when the app opens.')
                 self.cmb_session.grid(row=r, column=1, sticky="ew")
-            r += 1
+            if host is opt:
+                r += 1
         self.v_trim = tk.BooleanVar()
         self.v_quotes = tk.BooleanVar()
         for text, var, tip in (("Trim spaces from each lyric line", self.v_trim,
@@ -204,10 +243,6 @@ class App(tk.Tk):
                                  "libraries don't treat it as changed."),
                                 ("Retry songs not found in earlier runs", self.v_retry,
                                  "Search online again for songs that had no lyrics last time."),
-                                ("Check lyrics against the audio (slower)", self.v_fit_audio,
-                                 "While finding, decode each song with found lyrics to see whether lines start on "
-                                 "silence or run into the silence at the end; this sharpens the Fit score. Songs "
-                                 "opened in the player are always checked."),
                                 ("List only songs with lyrics found", self.v_only_found,
                                  "Review & player lists only the songs that have lyrics to write. Songs with "
                                  "nothing found (or already synced) are left out. Turn the list's Lyrics found "
@@ -300,6 +335,8 @@ class App(tk.Tk):
         self.v_threshold.set(snap5(s.match_threshold, 70, 100))
         self.v_confident.set(snap5(s.confident_threshold, 50, 100))
         self.v_fit.set(snap5(s.confident_fit, 0, 100))
+        self.v_ai.set(bool(s.ai_align))
+        self.v_ai_min.set(snap5(s.ai_align_min, 50, 100))
         self.v_fit_audio.set(bool(s.fit_audio))
         self.v_only_found.set(bool(s.only_found))
         self.v_retry.set(s.retry_misses)
@@ -325,6 +362,8 @@ class App(tk.Tk):
         s.confident_threshold = self._confident_value()
         s.confident_fit = self._fit_value()
         s.fit_audio = bool(self.v_fit_audio.get())
+        s.ai_align = bool(self.v_ai.get())
+        s.ai_align_min = self._ai_min_value()
         s.only_found = bool(self.v_only_found.get())
         s.output_mode = self.v_output.get()
         s.session_restore = next((k for k, v in SESSION_MODES if v == self.cmb_session.get()), "ask")
@@ -395,6 +434,8 @@ class App(tk.Tk):
 
     def _stop(self) -> None:
         self.cancel.set()
+        if getattr(self, "align_cancel", None) is not None:
+            self.align_cancel.set()
         self.v_status.set("Stopping after the current file…")
         self.btn_stop.config(state="disabled")
 
@@ -528,6 +569,147 @@ class App(tk.Tk):
             return snap5(self.v_threshold.get(), 70, 100)
         except tk.TclError:
             return 90
+
+    def _ai_min_value(self) -> int:
+        try:
+            return snap5(self.v_ai_min.get(), 50, 100)
+        except tk.TclError:
+            return 70
+
+    def _ai_min_changed(self) -> None:
+        v = self._ai_min_value()
+        try:
+            if self.v_ai_min.get() != v:
+                self.v_ai_min.set(v)
+        except tk.TclError:
+            self.v_ai_min.set(v)
+        if v != self.settings.ai_align_min:
+            self.settings.ai_align_min = v
+            try:
+                save_settings(self.settings)
+            except OSError:
+                pass
+
+    # ------------------------------------------------ Align low-confidence lyrics (NVIDIA GPU add-on)
+    def _ai_toggled(self) -> None:
+        from . import ai_align
+
+        if not self.v_ai.get():
+            self._ai_set(False)
+            return
+        gpu = ai_align.nvidia_gpu()
+        if gpu is None:
+            self.v_ai.set(False)
+            messagebox.showerror(APP_TITLE, "Align low-confidence lyrics needs an NVIDIA graphics card with its "
+                                            "driver installed, and none was found (nvidia-smi isn't available).")
+            return
+        if ai_align.is_installed():
+            self._ai_set(True)
+            self._log(f"Align: on — {gpu}.")
+            return
+        if getattr(self, "ai_install_worker", None) is not None and self.ai_install_worker.is_alive():
+            return
+        if not messagebox.askyesno(
+                APP_TITLE,
+                f"Found {gpu}.\n\nAligning needs a one-time add-on: PyTorch with CUDA, Whisper and Demucs, about "
+                f"3 GB downloaded from pypi.org and download.pytorch.org into\n{ai_align.addon_dir()}\n\nThe speech "
+                "and vocal-separation models (about 1.6 GB more) download the first time it runs. It needs "
+                "Python 3.10–3.12 (python.org) to be installed.\n\nInstall it now?"):
+            self.v_ai.set(False)
+            return
+        self.v_ai.set(False)                     # switched on once the add-on works
+        self._log("Align: installing the GPU add-on — this takes a while…")
+        self.ai_install_cancel = threading.Event()
+
+        def work():
+            ok = False
+            try:
+                ok = ai_align.install(lambda t: self.events.put({"type": "log", "text": t}), self.ai_install_cancel)
+            except Exception as e:
+                self.events.put({"type": "log", "text": f"Align: install failed: {type(e).__name__}: {e}"})
+            self.events.put({"type": "ai_installed", "ok": ok})
+        self.ai_install_worker = threading.Thread(target=work, daemon=True)
+        self.ai_install_worker.start()
+
+    def _ai_set(self, on: bool) -> None:
+        self.v_ai.set(on)
+        self.settings.ai_align = on
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+
+    def align_paths(self, paths: list[str] | None = None, everything: bool = True) -> None:
+        """Align on the GPU: the given songs (context menu), or the low-confidence ones in the list."""
+        from . import ai_align
+
+        if getattr(self, "align_worker", None) is not None and self.align_worker.is_alive():
+            return
+        if not (self.settings.ai_align and ai_align.is_installed()):
+            return
+        if ai_align.nvidia_gpu() is None:
+            self._log("Align: no NVIDIA GPU found — skipped.")
+            return
+        s = dataclasses.replace(self._collect_settings())
+        targets = list(paths) if paths is not None else self._session_paths()
+        self.align_cancel = threading.Event()
+        self.btn_stop.config(state="normal")
+        self.btn_start.config(state="disabled")
+
+        def work():
+            try:
+                ai_align.run(s, targets, self.events.put, self.align_cancel, everything=everything)
+            except Exception as e:
+                self.events.put({"type": "align_done", "counts": {}, "cancelled": False, "total": 0,
+                                 "error": f"{type(e).__name__}: {e}"})
+        self.align_worker = threading.Thread(target=work, daemon=True)
+        self.align_worker.start()
+
+    def _align_event(self, e: dict) -> None:
+        t = e["type"]
+        if t == "align_start":
+            if e["total"]:
+                self._log("")
+                self._log(f"Aligning {e['total']} low-confidence song(s) on the GPU — the first one also loads "
+                          "the models…")
+                self.v_status.set(f"Aligning 0/{e['total']} on the GPU…")
+            return
+        if t == "align_progress":
+            self.v_status.set(f"Aligning {e['done']}/{e['total']} on the GPU…")
+            name = display_path(e["path"])
+            if e["status"] == "aligned":
+                kind = e.get("kind") or "online"
+                kw = {f"conf_{kind}": e.get("confidence"), f"fit_{kind}": e.get("fit")}
+                if e["path"] in self.review.rows:
+                    self.review.add_row(e["path"], "aligned", **kw)
+                self._log(f"Aligned ({e['verify']:.0f}% of words heard): {name} — {e['reason']}")
+                if self.review.song is not None and self.review.song.path == e["path"]:
+                    self.review.load_song(e["path"])
+            elif e["status"] == "rejected":
+                v = e.get("verify")
+                self._log(f"Not aligned{f' ({v:.0f}% heard)' if v is not None else ''}: {name} — {e['reason']}")
+            elif e["status"] == "error":
+                self._log(f"Align error: {name} — {e['reason']}")
+            if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > 1.5:
+                self.refresh_apply_bar(background=True)
+            return
+        # align_done
+        c = e.get("counts", {})
+        if e.get("error"):
+            self._log(f"Align: stopped by an error: {e['error']}")
+        if e.get("total"):
+            self._log(f"Align: {c.get('aligned', 0)} aligned, {c.get('rejected', 0)} kept as found (below "
+                      f"{self.settings.ai_align_min}% or not placeable), {c.get('error', 0)} errors"
+                      + (" (stopped)" if e.get("cancelled") else "") + ".")
+            self.v_status.set(f"Aligned {c.get('aligned', 0)} of {e['total']} song(s) on the GPU"
+                              + (" (stopped)" if e.get("cancelled") else ""))
+        self.align_worker = None
+        finding = bool(self.worker and self.worker.is_alive())
+        applying = bool(self.apply_worker and self.apply_worker.is_alive())
+        self.btn_start.config(state="disabled" if finding or applying else "normal")
+        self.btn_stop.config(state="normal" if finding else "disabled")
+        self.refresh_apply_bar()
+        self.session_changed()
 
     def set_score_levels(self, confident: int | None = None, fit: int | None = None) -> None:
         """Change the High confidence / Good fit levels (from the Find tab or the list's header filters)."""
@@ -763,6 +945,13 @@ class App(tk.Tk):
                 return
             self.cancel.set()
             self.worker.join(timeout=10)
+        for name in ("align_cancel", "ai_install_cancel"):
+            ev = getattr(self, name, None)
+            if ev is not None:
+                ev.set()
+        aw = getattr(self, "align_worker", None)
+        if aw is not None and aw.is_alive():
+            aw.join(timeout=10)
         self.review.shutdown()
         self.save_session_now()
         try:
@@ -832,6 +1021,15 @@ class App(tk.Tk):
         elif t == "scan":
             self.progress.stop()
             self.progress.config(mode="determinate", maximum=max(1, e["total"]), value=0)
+        elif t in ("align_start", "align_progress", "align_done"):
+            self._align_event(e)
+        elif t == "ai_installed":
+            if e["ok"]:
+                self._ai_set(True)
+                self._log("Align: the add-on is installed and switched on.")
+            else:
+                self._ai_set(False)
+                self._log("Align: the add-on could not be installed; the option stays off.")
         elif t == "apply_counts":
             self._set_apply_counts(*e["counts"])
         elif t.startswith("review_"):
@@ -934,6 +1132,8 @@ class App(tk.Tk):
             if first and not self.review.tree.selection():
                 self.review.tree.selection_set(first)
                 self.review.tree.see(first)
+            if self.settings.ai_align and not e["cancelled"]:
+                self.align_paths(None, everything=False)      # then the low-confidence ones on the GPU
         elif t == "fatal":
             self.progress.stop()
             self._set_running(False)
