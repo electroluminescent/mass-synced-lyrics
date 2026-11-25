@@ -35,6 +35,11 @@ class RateLimiter:
         self._next = 0.0
         self._lock = threading.Lock()
 
+    def defer(self, seconds: float) -> None:
+        """Push the next allowed request back (a 429 pauses every thread, not just one)."""
+        with self._lock:
+            self._next = max(self._next, time.monotonic() + seconds)
+
     def wait(self, sleep: Callable[[float], None]) -> None:
         with self._lock:
             now = time.monotonic()
@@ -47,12 +52,26 @@ class RateLimiter:
 class HttpClient:
     def __init__(self, user_agent: str, per_minute: float, cancel: threading.Event | None = None,
                  session: requests.Session | None = None, max_attempts: int = 6):
-        self.session = session or requests.Session()
-        self.session.headers["User-Agent"] = user_agent
+        self._fixed_session = session
+        if session is not None:
+            session.headers["User-Agent"] = user_agent
+        self._ua = user_agent
+        self._local = threading.local()       # one requests.Session per worker thread
         self.limiter = RateLimiter(per_minute)
         self.cancel = cancel or threading.Event()
         self.max_attempts = max_attempts
         self.requests_made = 0
+
+    @property
+    def session(self):
+        if self._fixed_session is not None:
+            return self._fixed_session
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = requests.Session()
+            s.headers["User-Agent"] = self._ua
+            self._local.session = s
+        return s
 
     def sleep(self, seconds: float) -> None:
         if self.cancel.wait(seconds):
@@ -80,7 +99,9 @@ class HttpClient:
                     wait = float(ra)
                 except ValueError:
                     wait = 30.0
-                self.sleep(wait + random.uniform(0.5, 3.0))
+                wait += random.uniform(0.5, 3.0)
+                self.limiter.defer(wait)
+                self.sleep(wait)
                 last = "rate limited"
                 continue
             if r.status_code >= 500:

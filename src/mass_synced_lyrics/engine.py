@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -101,6 +102,10 @@ class Engine:
             else:
                 self._acoustid_missing = "no API key" if not key else "fpcalc not found"
         self.collection: LrcCollection | None = None
+        self._tls = threading.local()
+        self._states: list[State] = []
+        self._states_lock = threading.Lock()
+        self._acoustid_lock = threading.Lock()
 
     # ------------------------------------------------------------------ run
     def log(self, text: str) -> None:
@@ -136,25 +141,20 @@ class Engine:
             with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
                 writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
                 writer.writeheader()
-                for folder, audio, lrcs in folders:
-                    if self.cancel.is_set():
-                        break
-                    for res in self._process_folder(folder, audio, lrcs, state):
-                        done += 1
-                        self.counts[res.status] += 1
-                        self._record_result(state, res)
-                        if res.status != "cached":
-                            writer.writerow(self._row(res))
-                            fh.flush()
-                        self.emit({"type": "result", "result": res, "done": done, "total": total,
-                                   "counts": dict(self.counts),
-                                   "elapsed": time.monotonic() - started})
-                        if self.cancel.is_set():
-                            break
+                for res in self._run_pool(folders):
+                    done += 1
+                    self.counts[res.status] += 1
+                    self._record_result(state, res)
+                    if res.status != "cached":
+                        writer.writerow(self._row(res))
+                        fh.flush()
+                    self.emit({"type": "result", "result": res, "done": done, "total": total,
+                               "counts": dict(self.counts), "elapsed": time.monotonic() - started})
         except Cancelled:
             pass
         finally:
             state.close()
+            self._close_thread_states()
         cancelled = self.cancel.is_set()
         summary = {"type": "done", "counts": dict(self.counts), "csv": csv_path,
                    "cancelled": cancelled, "elapsed": time.monotonic() - started}
@@ -182,44 +182,114 @@ class Engine:
                     self.emit({"type": "scanning", "found": n})
         return out
 
-    # -------------------------------------------------------------- folders
-    def _process_folder(self, folder, audio_paths, lrc_paths, state):
-        tagfiles: dict[str, TagFile | Exception] = {}
+    # ------------------------------------------------------------ worker pool
+    # Folders are prepared (tags read, sidecar .lrc matched) and every song is then processed as its
+    # own job on a pool of threads, so slow network lookups overlap with local work. Results come
+    # back to the calling thread, which records them, writes the CSV and emits events.
+    def _run_pool(self, folders):
+        workers = max(1, int(getattr(self.s, "workers", 6) or 1))
+        limit = workers * 3                      # bound outstanding work (and open files)
+        folder_iter = iter(folders)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="msl") as pool:
+            pending: set = set()
+
+            def fill():
+                while not self.cancel.is_set() and len(pending) < limit:
+                    f = next(folder_iter, None)
+                    if f is None:
+                        return
+                    pending.add(pool.submit(self._prep_folder, *f))
+            fill()
+            while pending:
+                finished, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    pending.discard(fut)
+                    if fut.cancelled():
+                        continue
+                    kind, payload = fut.result()
+                    if kind == "prep":
+                        for job in payload:
+                            if self.cancel.is_set():
+                                break
+                            pending.add(pool.submit(self._file_job, *job))
+                    elif kind == "result":
+                        yield payload
+                if self.cancel.is_set():
+                    for fut in list(pending):
+                        if fut.cancel():
+                            pending.discard(fut)
+                else:
+                    fill()
+
+    def _thread_state(self) -> State:
+        st = getattr(self._tls, "state", None)
+        if st is None:
+            st = State(self.s.resolved_state_db())
+            self._tls.state = st
+            with self._states_lock:
+                self._states.append(st)
+        return st
+
+    def _close_thread_states(self) -> None:
+        with self._states_lock:
+            for st in self._states:
+                try:
+                    st.close()
+                except Exception:
+                    pass
+            self._states.clear()
+
+    def _prep_folder(self, folder, audio_paths, lrc_paths):
+        """Read tags where needed and match sidecar .lrc files; returns per-song jobs."""
+        try:
+            pre: dict[str, TagFile | Exception] = {}
+            matches: dict[str, SidecarMatch] = {}
+            notes: dict[str, str] = {}
+            if lrc_paths and self.s.output_mode == LRC:
+                # with .lrc output, "<song>.lrc" is the song's current lyrics, not a source to import
+                outputs = {os.path.normcase(lrc_path_for(a)) for a in audio_paths}
+                lrc_paths = [p for p in lrc_paths if os.path.normcase(p) not in outputs]
+            if lrc_paths:
+                entries = []
+                for p in audio_paths:
+                    if self.cancel.is_set():
+                        return "prep", []
+                    try:
+                        pre[p] = TagFile(p)
+                        entries.append(AudioEntry(p, pre[p].read(), pre[p].duration))
+                    except UnsupportedFile as e:
+                        pre[p] = e
+                        entries.append(AudioEntry(p, None, None))
+                matches, notes = match_folder(entries, lrc_paths, self.s.match_threshold)
+            return "prep", [(p, pre.get(p), matches.get(p), notes.get(p, "")) for p in audio_paths]
+        except Exception as e:
+            return "prep", [(p, e, None, "") for p in audio_paths]
+
+    def _file_job(self, path, pre, match, note):
+        if self.cancel.is_set():
+            return "skip", None
+        cache = {path: pre} if pre is not None else {}
 
         def open_tf(p):
-            if p not in tagfiles:
+            if p not in cache:
                 try:
-                    tagfiles[p] = TagFile(p)
+                    cache[p] = TagFile(p)
                 except UnsupportedFile as e:
-                    tagfiles[p] = e
-            return tagfiles[p]
-
-        matches: dict[str, SidecarMatch] = {}
-        notes: dict[str, str] = {}
-        if lrc_paths and self.s.output_mode == LRC:
-            # with .lrc output, "<song>.lrc" is the song's current lyrics, not a source to import
-            outputs = {os.path.normcase(lrc_path_for(a)) for a in audio_paths}
-            lrc_paths = [p for p in lrc_paths if os.path.normcase(p) not in outputs]
-        if lrc_paths:
-            entries = []
-            for p in audio_paths:
-                tf = open_tf(p)
-                if isinstance(tf, TagFile):
-                    entries.append(AudioEntry(p, tf.read(), tf.duration))
-                else:
-                    entries.append(AudioEntry(p, None, None))
-            matches, notes = match_folder(entries, lrc_paths, self.s.match_threshold)
-
-        for p in audio_paths:
-            if self.cancel.is_set():
-                return
+                    cache[p] = e
+            return cache[p]
+        state = self._thread_state()
+        try:
+            res = self._process_file(path, open_tf, match, note, state)
+        except Cancelled:
+            return "skip", None
+        except Exception as e:  # keep going on per-file failures
+            res = Result(path, "error", detail=f"{type(e).__name__}: {e}")
+        finally:
             try:
-                yield self._process_file(p, open_tf, matches.get(p), notes.get(p, ""), state)
-            except Cancelled:
-                raise
-            except Exception as e:  # keep going on per-file failures
-                yield Result(p, "error", detail=f"{type(e).__name__}: {e}")
-            tagfiles.pop(p, None)
+                state.commit()
+            except Exception:
+                pass
+        return "result", res
 
     # ----------------------------------------------------------------- file
     def _process_file(self, path, open_tf, match: SidecarMatch | None, note: str, state: State) -> Result:
@@ -362,9 +432,16 @@ class Engine:
                     return m, "identified via MusicBrainz ID"
             except ServiceError as e:
                 self.log(f"MusicBrainz lookup failed: {e}")
-        if self.acoustid is not None:
+        # One fingerprint at a time: fpcalc is CPU-heavy, AcoustID allows ~3 requests/s, and a
+        # rejected key must stop every thread after the first failure.
+        with self._acoustid_lock:
+            client = self.acoustid
+            if client is None:
+                if getattr(self, "_acoustid_rejected", False):
+                    return None, "AcoustID API key rejected"
+                return None, "missing title/artist tags"
             try:
-                m = self.acoustid.identify(display_path(path))
+                m = client.identify(display_path(path))
                 if m and m.identified:
                     m.album = meta.album or m.album
                     return m, "identified via AcoustID"
@@ -372,11 +449,11 @@ class Engine:
             except (ServiceError, OSError, ValueError) as e:
                 if "invalid API key" in str(e):
                     self.acoustid = None
+                    self._acoustid_rejected = True
                     self.log("AcoustID rejected the API key, so untagged files can't be identified this run. "
                              "It needs an *application* API key (register one at acoustid.org/new-application).")
                     return None, "AcoustID API key rejected"
                 return None, f"AcoustID failed: {e}"
-        return None, "missing title/artist tags"
 
     def _lookup(self, meta: Meta, duration: float | None, state: State) -> LyricsResult:
         key = lookup_key(meta, duration)

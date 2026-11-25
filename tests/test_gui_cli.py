@@ -111,18 +111,22 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     # number key (real key event through the app's binding) plays a checkpoint window then stops,
     # even right after clicking a lyric line or choosing in the (read-only) candidate list
     rv.v_cp_len.set(0.3)
+    started = []
+    real_play_cp = rv.play_checkpoint
+    rv.play_checkpoint = lambda i: (started.append(i), real_play_cp(i))[1]
     rv.cmb_cand.focus_force()
     app.update()
     rv.cmb_cand.event_generate("<KeyPress-1>")
     app.update()
-    assert rv.player.playing
+    assert started == [0]                       # (a slow machine may already have finished the 0.6 s window)
     rv.player.pause()
     rv.cp_range = None
     rv.txt_cur.focus_force()
     app.update()
     (app.focus_get() or rv).event_generate("<KeyPress-1>")
     app.update()
-    assert rv.player.playing
+    assert started == [0, 0]
+    rv.play_checkpoint = real_play_cp
     rv.player.pause()
     rv.cp_range = None
     # typing digits into an editable box must not trigger checkpoints
@@ -448,3 +452,50 @@ def test_cli_trim_and_straighten(settings, tmp_path, capsys, monkeypatch):
     assert cli.main([d, "--offline", "--trim", "--straighten", "--lrc-action", "keep",
                      "--log-dir", settings.log_dir, "--state-db", settings.state_db]) == 0
     assert TagFile(p).read().lyrics[0] == "[00:01.00]'x'\n[00:02.00]y..."
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_switches_to_review_on_first_result_and_allows_saving_while_finding(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    import threading
+
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics import gui
+    from mass_synced_lyrics.engine import Engine
+
+    d = settings.music_folder
+    a = make_track(os.path.join(d, "a.flac"), "flac")
+    make_track(os.path.join(d, "b.flac"), "flac", title="Other")
+    settings.dry_run = True
+    events = []
+    Engine(settings, events.append, lrclib=FakeLrclib([record(), record(title="Other")])).run()
+    app = new_app(settings)
+    app.nb.select(0)
+    app._switched_to_review = False
+    busy = threading.Event()
+    app.worker = threading.Thread(target=busy.wait, daemon=True)    # pretend Find is still running
+    app.worker.start()
+    results = [e for e in events if e["type"] in ("scan", "result")]
+    app._handle(results[0])                                           # scan
+    app._handle(results[1])                                           # first song found
+    app.update()
+    first = state_key(results[1]["result"].path)
+    assert str(app.nb.select()) == str(app.review)
+    assert app.review.tree.selection() == (first,)
+    app.refresh_apply_bar()
+    assert str(app.btn_apply_all.cget("state")) == "normal"           # can save while finding
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **k: True)
+    app.apply_paths([first])
+    for _ in range(300):
+        app.update()
+        if app.apply_worker is None:
+            break
+        app.after(10)
+    assert TagFile(a if first == state_key(a) else os.path.join(d, "b.flac")).read().lyrics
+    assert str(app.btn_start.cget("state")) == "disabled"             # Find is still running
+    busy.set()
+    app.worker.join(1)
+    app.review.shutdown()
+    app.destroy()

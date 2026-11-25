@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.4
+- Songs are looked up in parallel (6 workers by default, `--workers N`). The LRCLIB rate limit and
+  its back-off are shared by all workers; AcoustID lookups stay one at a time.
+- Saving (Apply, **Save now**, and restoring originals) also uses the worker threads. Two songs
+  that save to the same .lrc are never written at the same moment, and a failure on one file
+  doesn't stop the rest.
+- The app switches to **Review & player** as soon as the first song with new lyrics is found.
+  Songs can be played, edited and saved (bottom bar or right-click **Save now**) while the
+  rest are still being looked up.
+
 ## 1.1.3
 - New options (Find lyrics tab, off by default; `--trim` / `--straighten` on the command line):
   **Trim spaces from each lyric line** and **Straighten smart quotes and punctuation**

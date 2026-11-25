@@ -32,6 +32,7 @@ class Settings:
     fpcalc_path: str = ""
     retry_misses: bool = False
     requests_per_minute: int = 80
+    workers: int = 6                     # songs processed at the same time while finding lyrics
     checkpoint_seconds: float = 1.0      # review player: play ± this around a checkpoint
     loop_checkpoints: bool = False
     playback_volume: int = 80            # review player volume, 0–100

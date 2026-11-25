@@ -284,3 +284,51 @@ def test_tidy_options_apply_to_written_lyrics(settings):
     settings.tidy_quotes = True
     apply_all(settings, [b])
     assert "“" not in TagFile(b).read().lyrics[0] and "  " in TagFile(b).read().lyrics[0]
+
+
+def test_saving_runs_in_parallel_and_restores(settings):
+    from mass_synced_lyrics.applier import restore_originals
+    d = settings.music_folder
+    paths, recs = [], []
+    for i in range(24):
+        title = f"P{i}q Song"
+        paths.append(make_track(os.path.join(d, f"al{i % 4}", f"{i:02d}.flac"), "flac", title=title))
+        recs.append(record(title=title))
+    settings.dry_run = True
+    settings.workers = 6
+    Engine(settings, lambda e: None, lrclib=FakeLrclib(recs)).run()
+    events = []
+    out = apply_all(settings, paths, events.append)
+    assert out["counts"] == {"embedded": 24} and out["total"] == 24
+    done = [e["done"] for e in events if e["type"] == "apply_progress"]
+    assert done == list(range(1, 25))                                   # progress counts in order
+    assert {e["path"] for e in events if e["type"] == "apply_progress"} == set(paths)
+    for p in paths:
+        assert lrc.same_lyrics(TagFile(p).read().lyrics[0], LRC_B) and int(os.stat(p).st_mtime) == MTIME
+    with open(out["csv"], encoding="utf-8-sig") as fh:
+        assert len(fh.read().strip().splitlines()) == 25
+    assert plan(settings, paths) == []
+    r = restore_originals(settings, paths)
+    assert r["counts"] == {"restored": 24}
+    assert all(TagFile(p).read().lyrics == [] for p in paths)
+
+
+def test_parallel_save_cancel_stops_early(settings):
+    import threading
+    d = settings.music_folder
+    paths, recs = [], []
+    for i in range(30):
+        title = f"C{i}z Song"
+        paths.append(make_track(os.path.join(d, f"{i:02d}.flac"), "flac", title=title))
+        recs.append(record(title=title))
+    settings.dry_run = True
+    settings.workers = 2
+    Engine(settings, lambda e: None, lrclib=FakeLrclib(recs)).run()
+    cancel = threading.Event()
+
+    def emit(e):
+        if e["type"] == "apply_progress" and e["done"] == 3:
+            cancel.set()
+    out = apply_all(settings, paths, emit, cancel)
+    assert out["cancelled"] and 3 <= sum(out["counts"].values()) < 30
+    assert len(plan(settings, paths)) == 30 - sum(out["counts"].values())

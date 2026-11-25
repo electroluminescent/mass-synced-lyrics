@@ -10,6 +10,7 @@ import csv
 import os
 import threading
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Callable, Iterable
 
@@ -41,6 +42,71 @@ def plan(settings: Settings, paths: Iterable[str]) -> list[str]:
     return out
 
 
+def _parallel(settings: Settings, items: list[str], job: Callable[[str, State], object],
+              cancel: threading.Event):
+    """Run job(item, state) on a pool of worker threads (settings.workers), each with its own
+    State connection. Yields (item, result) as each one finishes; stops handing out work on cancel."""
+    workers = max(1, min(int(getattr(settings, "workers", 6) or 1), len(items) or 1))
+    tls = threading.local()
+    states: list[State] = []
+    lock = threading.Lock()
+
+    def run(item):
+        if cancel.is_set():
+            return None
+        st = getattr(tls, "state", None)
+        if st is None:
+            st = tls.state = State(settings.resolved_state_db())
+            with lock:
+                states.append(st)
+        return job(item, st)
+
+    it = iter(items)
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="msl-save") as pool:
+            pending = {}
+            for item in it:
+                pending[pool.submit(run, item)] = item
+                if len(pending) >= workers * 2:
+                    break
+            while pending:
+                done, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                for f in done:
+                    item = pending.pop(f)
+                    res = f.result()
+                    if res is not None:
+                        yield item, res
+                if cancel.is_set():
+                    for f in list(pending):
+                        if f.cancel():
+                            pending.pop(f)
+                    continue
+                for item in it:
+                    pending[pool.submit(run, item)] = item
+                    if len(pending) >= workers * 2:
+                        break
+    finally:
+        for st in states:
+            try:
+                st.close()
+            except Exception:
+                pass
+
+
+class _PathLocks:
+    """One lock per output file, so two songs that share an output (song.flac and song.mp3 both
+    saving song.lrc) are never written at the same moment."""
+
+    def __init__(self):
+        self._locks: dict[str, threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    def get(self, key: str) -> threading.Lock:
+        key = os.path.normcase(os.path.abspath(key))
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+
 def apply_all(settings: Settings, paths: Iterable[str], emit: Callable[[dict], None] | None = None,
               cancel: threading.Event | None = None) -> dict:
     emit = emit or (lambda e: None)
@@ -51,26 +117,29 @@ def apply_all(settings: Settings, paths: Iterable[str], emit: Callable[[dict], N
     os.makedirs(settings.resolved_log_dir(), exist_ok=True)
     csv_path = os.path.join(settings.resolved_log_dir(),
                             f"apply-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{mode}.csv")
-    state = State(settings.resolved_state_db())
+    locks = _PathLocks()
+
+    def job(path: str, state: State):
+        out = lrc_path_for(path) if mode == LRC else path
+        with locks.get(out):
+            try:
+                return _apply_one(path, mode, settings, state)
+            except Exception as e:                      # one bad file never stops the others
+                return "error", "", f"{type(e).__name__}: {e}"
+
     emit({"type": "apply_start", "total": len(todo), "mode": mode})
-    try:
-        with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
-            w = csv.DictWriter(fh, fieldnames=["time", "status", "source", "path", "output", "detail"])
-            w.writeheader()
-            for i, path in enumerate(todo, 1):
-                if cancel.is_set():
-                    break
-                status, source, detail = _apply_one(path, mode, settings, state)
-                counts[status] += 1
-                out = lrc_path_for(path) if mode == LRC else path
-                w.writerow({"time": datetime.now().isoformat(timespec="seconds"), "status": status,
-                            "source": source, "path": display_path(path), "output": display_path(out),
-                            "detail": detail})
-                fh.flush()
-                emit({"type": "apply_progress", "done": i, "total": len(todo), "path": path,
-                      "status": status, "source": source, "detail": detail, "counts": dict(counts)})
-    finally:
-        state.close()
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.DictWriter(fh, fieldnames=["time", "status", "source", "path", "output", "detail"])
+        w.writeheader()
+        for i, (path, (status, source, detail)) in enumerate(_parallel(settings, todo, job, cancel), 1):
+            counts[status] += 1
+            out = lrc_path_for(path) if mode == LRC else path
+            w.writerow({"time": datetime.now().isoformat(timespec="seconds"), "status": status,
+                        "source": source, "path": display_path(path), "output": display_path(out),
+                        "detail": detail})
+            fh.flush()
+            emit({"type": "apply_progress", "done": i, "total": len(todo), "path": path,
+                  "status": status, "source": source, "detail": detail, "counts": dict(counts)})
     summary = {"type": "apply_done", "counts": dict(counts), "csv": csv_path, "mode": mode,
                "cancelled": cancel.is_set(), "total": len(todo)}
     emit(summary)
@@ -137,18 +206,20 @@ def restore_originals(settings: Settings, paths: Iterable[str], emit: Callable[[
     cancel = cancel or threading.Event()
     counts: Counter = Counter()
     todo = [state_key(p) for p in paths]
-    state = State(settings.resolved_state_db())
+    locks = _PathLocks()
+
+    def job(path: str, state: State):
+        with locks.get(lrc_path_for(path)):
+            try:
+                return _restore_one(path, settings, state)
+            except Exception as e:
+                return "error", f"{type(e).__name__}: {e}"
+
     emit({"type": "restore_start", "total": len(todo)})
-    try:
-        for i, path in enumerate(todo, 1):
-            if cancel.is_set():
-                break
-            status, detail = _restore_one(path, settings, state)
-            counts[status] += 1
-            emit({"type": "restore_progress", "done": i, "total": len(todo), "path": path,
-                  "status": status, "detail": detail, "counts": dict(counts)})
-    finally:
-        state.close()
+    for i, (path, (status, detail)) in enumerate(_parallel(settings, todo, job, cancel), 1):
+        counts[status] += 1
+        emit({"type": "restore_progress", "done": i, "total": len(todo), "path": path,
+              "status": status, "detail": detail, "counts": dict(counts)})
     summary = {"type": "restore_done", "counts": dict(counts), "cancelled": cancel.is_set()}
     emit(summary)
     return summary

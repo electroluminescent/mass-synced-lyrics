@@ -145,13 +145,17 @@ mass-synced-lyrics-gui                 # desktop interface
 mass-synced-lyrics "D:\Music" --dry-run
 ```
 
-Command line options: `--output embed|lrc`, `--trim`, `--straighten`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--log-dir DIR`, `--state-db FILE`.
+Command line options: `--output embed|lrc`, `--trim`, `--straighten`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--workers 6`, `--log-dir DIR`, `--state-db FILE`.
 
 Settings, the state database and logs are stored in `%APPDATA%\mass-synced-lyrics\`.
 
 ## Speed
 
 LRCLIB allows about 90 requests/minute for identified clients, and this tool uses 80 by default. Most tracks need 1–2 requests, so a 40,000-track library takes roughly 8–16 hours on the first pass. Sidecar and collection matches are instant. Stopping and resuming is safe.
+
+Songs are processed in parallel (6 workers by default; `--workers N`, or `"workers"` in `settings.json`). Saving uses the same number of workers. All lookup workers share the one LRCLIB rate limit, and a "slow down" reply from LRCLIB pauses all of them. AcoustID lookups run one at a time.
+
+The app switches to the **Review & player** tab as soon as the first song with new lyrics is found. You can play, edit and save songs there while the rest are still being looked up; the list keeps growing as results come in.
 
 ## Building
 

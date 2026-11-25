@@ -21,8 +21,12 @@ PIN = "pin"        # this file must carry exactly the pinned text ("" = no lyric
 class State:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self.db = sqlite3.connect(path, timeout=30)
+        # Autocommit: every write is its own short transaction, so several worker threads (each with
+        # its own connection) never hold a lock while doing anything slow. WAL lets readers run alongside.
+        self.db = sqlite3.connect(path, timeout=30, isolation_level=None, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS files (

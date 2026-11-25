@@ -194,3 +194,50 @@ def test_invalid_acoustid_key_disables_fingerprinting_once(settings):
     assert BadKey.calls == 1
     assert {r.status for r in res.values()} == {"no_metadata"}
     assert sum("rejected the API key" in e.get("text", "") for e in events) == 1
+
+
+def test_parallel_workers_are_faster_and_consistent(settings):
+    import time as _t
+
+    class SlowLrclib(FakeLrclib):
+        def get(self, *a, **k):
+            _t.sleep(0.05)
+            return super().get(*a, **k)
+
+        def search(self, *a, **k):
+            _t.sleep(0.05)
+            return super().search(*a, **k)
+
+    recs = []
+    for f in range(6):
+        for n in range(5):
+            title = f"T{f}x{n} Song"
+            make_track(os.path.join(settings.music_folder, f"album{f}", f"{n:02d} {title}.flac"), "flac",
+                       title=title)
+            if n % 2 == 0:
+                recs.append(record(title=title))
+    settings.dry_run = True
+    results = {}
+    timings = {}
+    for workers in (1, 6):
+        settings.workers = workers
+        settings.state_db = os.path.join(os.path.dirname(settings.state_db), f"state-{workers}.db")
+        events = []
+        t0 = _t.monotonic()
+        Engine(settings, events.append, lrclib=SlowLrclib(recs)).run()
+        timings[workers] = _t.monotonic() - t0
+        res = {os.path.basename(e["result"].path): e["result"].status for e in events if e["type"] == "result"}
+        assert len(res) == 30 and "error" not in res.values(), res
+        results[workers] = res
+    assert results[1] == results[6]
+    assert sum(1 for v in results[6].values() if v == "proposed") == 18
+    assert timings[6] < timings[1] * 0.6, timings
+
+
+def test_rate_limit_backoff_is_shared():
+    from mass_synced_lyrics.providers import RateLimiter
+    rl = RateLimiter(6000)
+    slept = []
+    rl.defer(5.0)
+    rl.wait(slept.append)
+    assert slept and slept[0] > 4.5            # another thread's 429 pauses this one too

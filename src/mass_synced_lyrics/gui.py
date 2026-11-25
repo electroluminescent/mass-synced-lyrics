@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import time
 import queue
 import subprocess
 import sys
@@ -333,6 +334,7 @@ class App(tk.Tk):
             return
         save_settings(s)
         s = dataclasses.replace(s, dry_run=True)   # find only; the bottom bar writes
+        self._switched_to_review = False
         self.cancel = threading.Event()
         self._set_running(True)
         self._clear_log()
@@ -354,7 +356,8 @@ class App(tk.Tk):
         self.btn_stop.config(state="disabled")
 
     def _set_running(self, running: bool) -> None:
-        self.btn_start.config(state="disabled" if running else "normal")
+        applying = bool(getattr(self, "apply_worker", None) and self.apply_worker.is_alive())
+        self.btn_start.config(state="disabled" if running or applying else "normal")
         self.btn_stop.config(state="normal" if running else "disabled")
         self.refresh_apply_bar()
 
@@ -406,8 +409,21 @@ class App(tk.Tk):
         running = bool(self.worker and self.worker.is_alive())
         target = "embed into" if self.v_output.get() == "embed" else "save .lrc for"
         self.v_apply.set(f"{n} file(s) ready" + (" — still finding…" if running else ""))
-        self.btn_apply_all.config(text=f"Apply: {target} {n} file(s)",
-                                  state="normal" if n and not running else "disabled")
+        self.btn_apply_all.config(text=f"Apply: {target} {n} file(s)", state="normal" if n else "disabled")
+        self._apply_bar_refreshed = time.monotonic()
+
+    def _first_reviewable(self, path: str) -> None:
+        """The first song with lyrics to look at: open it in Review & player while the rest load."""
+        self._switched_to_review = True
+        if str(self.nb.select()) != str(self.review) and not self.review.tree.selection():
+            self.nb.select(self.review)
+            key = state_key(path)
+            if self.review.tree.exists(key):
+                self.review.tree.selection_set(key)
+                self.review.tree.focus(key)
+                self.review.tree.see(key)
+            self._log("Lyrics found — opened Review & player. You can review, edit and save songs "
+                      "while the rest are still loading.")
 
     def _output_changed(self) -> None:
         self.settings.output_mode = self.v_output.get()
@@ -587,7 +603,8 @@ class App(tk.Tk):
     def _apply_finished(self) -> None:
         self.apply_progress.pack_forget()
         self.btn_apply_stop.pack_forget()
-        self.btn_start.config(state="normal")
+        finding = bool(self.worker and self.worker.is_alive())
+        self.btn_start.config(state="disabled" if finding else "normal")
         self.apply_worker = None
         self.refresh_apply_bar()
 
@@ -713,6 +730,10 @@ class App(tk.Tk):
                                     r.local, r.online, r.choice, m.album if m else "")
                 if not self._apply_bar_shown:
                     self.show_apply_bar()
+                if r.status == "proposed" and not getattr(self, "_switched_to_review", True):
+                    self._first_reviewable(r.path)
+            if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > 1.5:
+                self.refresh_apply_bar()
                 label = STATUS_LABELS.get(r.status, r.status)
                 src = f" [{r.source}]" if r.source and r.status == "embedded" else ""
                 det = f" — {r.detail}" if r.detail else ""

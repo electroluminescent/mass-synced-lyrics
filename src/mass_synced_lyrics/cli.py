@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fpcalc", help="path to fpcalc")
     p.add_argument("--retry-misses", action="store_true", help="look up again tracks that were not found before")
     p.add_argument("--rpm", type=int, help="LRCLIB requests per minute (default 80)")
+    p.add_argument("--workers", type=int, help="songs processed at the same time (default 6)")
     p.add_argument("--log-dir", help="folder for CSV logs")
     p.add_argument("--state-db", help="SQLite state file")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -85,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     s.retry_misses = args.retry_misses
     if args.rpm:
         s.requests_per_minute = args.rpm
+    if args.workers:
+        s.workers = max(1, min(32, args.workers))
     if args.log_dir:
         s.log_dir = args.log_dir
     if args.state_db:
