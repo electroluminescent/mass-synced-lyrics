@@ -336,6 +336,8 @@ class Outcome:
     details: dict = field(default_factory=dict)
     pin_map: dict = field(default_factory=dict)      # pin_key(original time) -> new time, lines the aligner placed
     heard: list = field(default_factory=list)        # [[word, start, end, probability], ...] as heard
+    ends: dict = field(default_factory=dict)         # pin_key(line) -> time the line ends early (a gap follows)
+    line_conf: dict = field(default_factory=dict)    # pin_key(line) -> 0-1 how surely it was heard
 
 
 _WORD_RE = re.compile(r"\w", re.UNICODE)
@@ -381,6 +383,161 @@ def heard_words(result: dict) -> list:
     return out
 
 
+_TOKEN_RE = re.compile(r"[\w']+", re.UNICODE)
+MATCH_SIM = 70          # % similarity for a transcript word to count as a lyric word
+GAP_AFTER = 3.0         # seconds without lyrics after a placed line before it gets an end mark
+WORD_DUR = 0.28         # typical sung word, for backing up over unheard words at a line's start
+MAX_WORD = 1.5          # longer "words" are the recogniser stretching a word over silence
+
+
+def _tokens(text: str) -> list[str]:
+    return [t.replace("'", "") for t in _TOKEN_RE.findall((text or "").lower()) if t.replace("'", "")]
+
+
+def match_transcript(lines: list[str], transcript: list) -> list[list[tuple]]:
+    """Which lyric words were actually heard, and when. Monotonic alignment of the lyric words to the
+    transcript: transcript words that match no lyric (ad-libs, talk, crowd) are skipped cheaply, lyric
+    words that weren't heard cost a little more, and similar words (≥ MATCH_SIM %) score.
+    Returns, per lyric line, [(word position in the line, start, end, probability, similarity), ...]."""
+    from rapidfuzz import fuzz
+    from rapidfuzz.process import cdist
+
+    lw: list[tuple[int, int, str]] = []                 # (line, position in line, token)
+    for li, line in enumerate(lines):
+        for pos, tok in enumerate(_tokens(line)):
+            lw.append((li, pos, tok))
+    tw: list[tuple[str, float, float, float]] = []
+    for w in transcript or []:
+        toks = _tokens(w[0])
+        if toks and len(w) >= 4:
+            tw.append(("".join(toks), float(w[1]), float(w[2]), float(w[3])))
+    out: list[list[tuple]] = [[] for _ in lines]
+    if not lw or not tw:
+        return out
+    sim = cdist([t for _, _, t in lw], [t for t, _, _, _ in tw], scorer=fuzz.ratio)
+    n, m = len(lw), len(tw)
+    SKIP_T, SKIP_L, MISS = -0.15, -0.6, -1.0
+    neg = -1e9
+    D = [[0.0] * (m + 1) for _ in range(n + 1)]
+    B = [[0] * (m + 1) for _ in range(n + 1)]             # 1 = pair, 2 = skip lyric word, 3 = skip transcript
+    for i in range(1, n + 1):
+        D[i][0] = D[i - 1][0] + SKIP_L
+        B[i][0] = 2
+        row, prev, srow = D[i], D[i - 1], sim[i - 1]
+        brow = B[i]
+        for j in range(1, m + 1):
+            s = srow[j - 1]
+            gain = 2.0 if s >= 85 else (1.0 if s >= MATCH_SIM else MISS)
+            best, how = prev[j - 1] + gain, 1
+            v = prev[j] + SKIP_L
+            if v > best:
+                best, how = v, 2
+            v = row[j - 1] + SKIP_T
+            if v > best:
+                best, how = v, 3
+            row[j], brow[j] = best, how
+    # free end in the transcript (talk after the last lyric costs nothing)
+    j = max(range(m + 1), key=lambda k: D[n][k] if k else neg)
+    i = n
+    while i > 0 and j > 0:
+        how = B[i][j]
+        if how == 1:
+            s = sim[i - 1][j - 1]
+            if s >= MATCH_SIM:
+                li, pos, _ = lw[i - 1]
+                t = tw[j - 1]
+                out[li].append((pos, t[1], t[2], t[3], s / 100.0))
+            i, j = i - 1, j - 1
+        elif how == 2:
+            i -= 1
+        else:
+            j -= 1
+    for words in out:
+        words.reverse()
+    return out
+
+
+def _onset(words) -> float | None:
+    """Where a line starts, from its aligned words: the first word with a believable length (words
+    stretched over silence are skipped), backed up over the words before it."""
+    for pos, w in enumerate(words):
+        d = w[2] - w[1]
+        if 0.02 <= d <= MAX_WORD:
+            return max(0.0, w[1] - WORD_DUR * pos)
+    return None
+
+
+def _evaluate_heard(text: str, items, result: dict, duration, minimum: float, mode: str) -> "Outcome":
+    """Live-safe evaluation: place lines from the words actually heard (transcript), using the forced
+    alignment's more precise onset only where both agree."""
+    lines = [b for _, b in items]
+    heard = match_transcript(lines, result.get("transcript") or [])
+    forced = map_lines(lines, result.get("segments") or [])
+    n_words = sum(len(_tokens(b)) for b in lines)
+    n_ok = sum(len(h) for h in heard)
+    verify = round(100.0 * n_ok / n_words, 1) if n_words else 0.0
+    anchors, conf, last_end = [], {}, {}
+    for (orig, body), words, fw in zip(items, heard, forced):
+        total = max(1, len(_tokens(body)))
+        if not words:
+            continue
+        cover = len(words) / total
+        quality = sum(w[3] * w[4] for w in words) / len(words)
+        c = round(cover * (0.5 + 0.5 * quality), 3)
+        conf[lrcmod.pin_key(orig)] = c
+        last_end[lrcmod.pin_key(orig)] = min(words[-1][2], words[-1][1] + MAX_WORD)
+        if cover < 0.5 or (len(words) < 2 and total > 2):
+            continue
+        # line start: each heard word suggests one (its start, backed up over the words before it in
+        # the line); words stretched over silence by the recogniser are ignored; median of the first few
+        sugg = [w[1] - WORD_DUR * w[0] for w in words if (w[2] - w[1]) <= MAX_WORD][:3]
+        if not sugg:
+            continue
+        sugg.sort()
+        est = max(0.0, sugg[len(sugg) // 2])
+        fon = _onset(fw)
+        start = fon if fon is not None and abs(fon - est) <= 1.0 else est
+        if duration is None or 0 <= start <= duration:
+            anchors.append((orig, start, c))
+    pins: dict[str, float] = {}
+    last_new = -1.0
+    for orig, new, _c in sorted(anchors):
+        if new > last_new + 0.05:
+            pins[lrcmod.pin_key(orig)] = round(new, 2)
+            last_new = new
+    base = Outcome(False, verify, pins=len(pins), lines=len(items), language=result.get("language") or "",
+                   details={"words": n_words, "clear": n_ok, "method": "heard"}, pin_map=dict(pins),
+                   heard=[list(w) for w in result.get("transcript") or []])
+    base.line_conf = {k: v for k, v in conf.items()}
+    if verify < minimum:
+        base.reason = f"only {verify:.0f}% of the lyric's words were heard being sung (needs {minimum:.0f}%)"
+        return base
+    if len(pins) < 2:
+        base.reason = "fewer than 2 lines could be placed with confidence"
+        return base
+    moves = sorted(abs(v - float(k)) for k, v in pins.items())
+    base.moved = round(moves[len(moves) // 2], 2)
+    timed = lrcmod.retime(text, pins=pins, interpolate=True, mode=mode, duration=duration)
+    # end placed lines early when nothing from the lyrics follows for a while (talk, a break)
+    new_lines = lrcmod.display_lines(timed)
+    orig_lines = lrcmod.display_lines(text)
+    ends: dict[str, float] = {}
+    for i, ((ot, ob), (nt, nb)) in enumerate(zip(orig_lines, new_lines)):
+        k = lrcmod.pin_key(ot) if ot is not None else None
+        if k not in pins or k not in last_end or i + 1 >= len(new_lines):
+            continue
+        nxt_t, nxt_b = new_lines[i + 1]
+        if not (nxt_b or "").strip():
+            continue                                       # already followed by a gap
+        end = last_end[k] + 0.4
+        if nxt_t is not None and nxt_t - end >= GAP_AFTER and end > nt:
+            ends[k] = round(end, 2)
+    base.ends = ends
+    base.text = lrcmod.insert_blank_lines(timed, ends.values())
+    base.ok = True
+    return base
+
+
 def evaluate(text: str, result: dict, duration: float | None, minimum: float, mode: str = "slope") -> Outcome:
     """Turn the worker's result into re-timed lyrics and a verify score; ok only at or above `minimum`.
     mode: how lines the aligner couldn't place follow the placed ones ("slope" = Interpolate,
@@ -390,7 +547,10 @@ def evaluate(text: str, result: dict, duration: float | None, minimum: float, mo
         return Outcome(False, 0.0, reason="fewer than 2 timed lines")
     if not result.get("ok"):
         return Outcome(False, 0.0, reason=result.get("error") or "alignment failed", lines=len(items))
+    if result.get("transcript"):
+        return _evaluate_heard(text, items, result, duration, minimum, mode)
     per_line = map_lines([b for _, b in items], result.get("segments") or [])
+    line_conf: dict[str, float] = {}
     n_words = n_ok = 0
     anchors: list[tuple[float, float, float]] = []          # (original time, new time, line probability)
     for (orig, _body), words in zip(items, per_line):
@@ -398,9 +558,10 @@ def evaluate(text: str, result: dict, duration: float | None, minimum: float, mo
         n_words += len(words)
         clear = [w for w in good if w[3] >= WORD_OK]
         n_ok += len(clear)
-        if good:
+        start = _onset(words)
+        if good and start is not None:
             prob = sum(w[3] for w in good) / len(words)
-            start = good[0][1]
+            line_conf[lrcmod.pin_key(orig)] = round(prob, 3)
             if prob >= PIN_LINE and (duration is None or 0 <= start <= duration):
                 anchors.append((orig, start, prob))
     verify = round(100.0 * n_ok / n_words, 1) if n_words else 0.0
@@ -413,7 +574,8 @@ def evaluate(text: str, result: dict, duration: float | None, minimum: float, mo
             pins[lrcmod.pin_key(orig)] = round(new, 2)
             last_new = new
     base = Outcome(False, verify, pins=len(pins), lines=len(items), language=lang,
-                   details={"words": n_words, "clear": n_ok}, pin_map=dict(pins), heard=heard_words(result))
+                   details={"words": n_words, "clear": n_ok}, pin_map=dict(pins), heard=heard_words(result),
+                   line_conf=line_conf)
     if verify < minimum:
         base.reason = f"only {verify:.0f}% of the words were heard clearly (needs {minimum:.0f}%)"
         return base
@@ -508,7 +670,7 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float) -> dict:
     if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit):
         return dict(ev, reason="changed or saved meanwhile")
     st.set_aligned(path, h, True, out.verify, "", out.text, conf, new_fit, kind, orig=text, pins=out.pin_map,
-                   heard=out.heard, mode=mode)
+                   heard=out.heard, mode=mode, ends=out.ends, confs=out.line_conf)
     st.commit()
     return dict(ev, status="aligned", verify=out.verify, confidence=conf, fit=new_fit,
                 reason=f"{out.pins} of {out.lines} lines placed from the audio, the rest interpolated; "
@@ -675,54 +837,63 @@ class AlignService:
                     self.busy = True
                     if item[0] == "song":
                         self._queued.discard(item[1])
-                s = self._settings_fn()
-                if item[0] == "raw":
-                    _, path, lines, probe, token = item
+                try:
+                    s = self._settings_fn()
+                    if item[0] == "raw":
+                        _, path, lines, probe, token = item
+                        try:
+                            if nvidia_gpu() is None:
+                                raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
+                            if self._aligner is None:
+                                self._aligner = self._factory(s)
+                            result = self._aligner.align(path, lines, probe=probe)
+                        except Exception as e:
+                            msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
+                            self._emit({"type": "align_raw", "token": token, "path": path,
+                                        "result": {"ok": False, "error": msg}})
+                            if self._aligner is not None:
+                                self._aligner.close()
+                                self._aligner = None
+                            self._pause(msg, path)
+                            continue
+                        self._emit({"type": "align_raw", "token": token, "path": path, "result": result})
+                        continue
+                    _, path, force = item
+                    if st is None:
+                        st = State(s.resolved_state_db())
+                    if not force:
+                        c, f = st.pending_scores().get(path, (None, None))
+                        if not is_low_confidence(s, c, f):
+                            continue
+                    self._emit({"type": "align_song_start", "path": path})
                     try:
                         if nvidia_gpu() is None:
                             raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
                         if self._aligner is None:
                             self._aligner = self._factory(s)
-                        result = self._aligner.align(path, lines, probe=probe)
-                    except Exception as e:
+                        ev = align_one(s, path, self._aligner, st, float(getattr(s, "ai_align_min", 70)))
+                    except Exception as e:                  # the aligner itself failed (or something unexpected)
                         msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
-                        self._emit({"type": "align_raw", "token": token, "path": path,
-                                    "result": {"ok": False, "error": msg}})
-                        if self._aligner is not None:
-                            self._aligner.close()
-                            self._aligner = None
-                        self._pause(msg, path)
+                        self._fail(path, msg)
+                        streak = 0
                         continue
-                    self._emit({"type": "align_raw", "token": token, "path": path, "result": result})
-                    continue
-                _, path, force = item
-                if st is None:
-                    st = State(s.resolved_state_db())
-                if not force:
-                    c, f = st.pending_scores().get(path, (None, None))
-                    if not is_low_confidence(s, c, f):
-                        continue
-                self._emit({"type": "align_song_start", "path": path})
-                try:
-                    if nvidia_gpu() is None:
-                        raise AlignerError("no NVIDIA GPU was found (nvidia-smi isn't available)")
-                    if self._aligner is None:
-                        self._aligner = self._factory(s)
-                    ev = align_one(s, path, self._aligner, st, float(getattr(s, "ai_align_min", 70)))
-                except Exception as e:                  # the aligner itself failed (or something unexpected)
-                    msg = str(e) if isinstance(e, AlignerError) else f"{type(e).__name__}: {e}"
-                    self._fail(path, msg)
-                    streak = 0
-                    continue
-                self.done += 1
-                self.counts[ev["status"]] += 1
-                ev["queued"] = self.pending()
-                self._emit(ev)
-                streak = streak + 1 if ev["status"] == "error" else 0
-                if streak >= self.PER_SONG_ERRORS_BEFORE_PAUSE:
-                    streak = 0
-                    self._pause(f"{self.PER_SONG_ERRORS_BEFORE_PAUSE} songs in a row could not be aligned. "
-                                f"Last: {ev['reason']}", path)
+                    self.done += 1
+                    self.counts[ev["status"]] += 1
+                    ev["queued"] = self.pending()
+                    self._emit(ev)
+                    streak = streak + 1 if ev["status"] == "error" else 0
+                    if streak >= self.PER_SONG_ERRORS_BEFORE_PAUSE:
+                        streak = 0
+                        self._pause(f"{self.PER_SONG_ERRORS_BEFORE_PAUSE} songs in a row could not be aligned. "
+                                    f"Last: {ev['reason']}", path)
+                except Exception as e:                 # never let the aligner's thread die quietly
+                    if st is not None:
+                        try:
+                            st.close()
+                        except Exception:
+                            pass
+                        st = None
+                    self._pause(f"Unexpected error while aligning: {type(e).__name__}: {e}", item[1])
         finally:
             if self._aligner is not None:
                 self._aligner.close()

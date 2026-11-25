@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.5.0
+- **Edited lane:** the waveforms now show three lanes: Current, Found (the lyrics as found) and
+  **Edited**. The Edited lane appears whenever the timing was changed, by you or by the aligner, and
+  stays when you go to another song and come back. Aligner-placed lines are purple, brighter where
+  they were heard more surely; times you set are yellow.
+- **Resize lyrics on the timeline:** drag either edge of a lyric (the cursor changes on an edge).
+  - Dragging the start moves only that lyric.
+  - Dragging the end into empty time moves only the gap. Nothing after it moves until the gap is used up.
+  - Dragging the end when the next lyric starts right after it pushes the following lyrics, up to the
+    next gap, which absorbs the change. Dragging it earlier opens a gap instead.
+- **Concert-aware alignment:** the aligner now also writes down what was actually sung or said, and
+  matches the lyrics to those words. Talk between songs, band introductions and ad-libs no longer
+  pull lyrics onto them. The verify score is the share of lyric words heard being sung, and gaps are
+  inserted where the performer talks. (Cornerstone: the "sister" verse now lands at 2:59.76 instead
+  of on the talk at 2:38; the talk becomes a gap at 2:35.50; 92 % of words heard.)
+- **Songs aligned by 1.2.x now show their edits** in the player (they used to look unchanged).
+- **Fixed:** the GPU align progress row could stay frozen on its last count after everything was
+  aligned. An unexpected error while aligning now pauses alignment with the error window instead of
+  stopping silently.
+
 ## 1.4.0
 - **Progress for everything still running:** a row at the top of the window for each operation, with
   a progress bar, a count and a Stop button. It covers Find lyrics, saving or restoring, GPU aligning,

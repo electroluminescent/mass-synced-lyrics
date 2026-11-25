@@ -736,14 +736,10 @@ class App(tk.Tk):
             self._align_error_dialog(e["error"])
             return
         # align_idle: the queue is empty for now
-        finding = bool(self.worker and self.worker.is_alive())
-        if not finding and svc is not None and svc.done:
+        if svc is not None and svc.done and not (self.worker and self.worker.is_alive()):
             c = e.get("counts", {})
-            self._log(f"Align: {c.get('aligned', 0)} aligned, {c.get('rejected', 0)} kept as found (below "
-                      f"{self.settings.ai_align_min}% or not placeable), {c.get('error', 0)} errors.")
             self.v_status.set(f"Aligned {c.get('aligned', 0)} of {svc.done} song(s) on the GPU")
-            svc.reset_counts()
-            self.btn_stop.config(state="disabled")
+        self._align_finish_if_idle()
         self.refresh_apply_bar()
         self.session_changed()
 
@@ -1184,8 +1180,32 @@ class App(tk.Tk):
                 self.activity.done("align")
             return
         detail = f"{svc.done} of {total}" + (" · paused" if paused else "")
+        if not paused and not waiting and not busy:
+            if not finding:
+                self._align_finish_if_idle()
+                return
+            detail = f"{svc.done} done · waiting for songs from Find…"
         self.activity.set("align", "Aligning on the GPU", svc.done, max(1, total), detail=detail,
                           stop=self._align_stop)
+
+    def _align_finish_if_idle(self) -> None:
+        """Find is over and the aligner has nothing left: report and remove its progress row (it used to
+        stay on the last count when the aligner went idle before Find finished)."""
+        svc = self._align_service(create=False)
+        if svc is None:
+            self.activity.done("align")
+            return
+        if svc.paused or not svc.idle() or (self.worker and self.worker.is_alive()):
+            return
+        if svc.done:
+            c = svc.counts
+            self._log(f"Align: {c.get('aligned', 0)} aligned, {c.get('rejected', 0)} kept as found (below "
+                      f"{self.settings.ai_align_min}% or not placeable), {c.get('error', 0)} errors.")
+            svc.reset_counts()
+        self.activity.done("align")
+        self.review.clear_busy("align")
+        if not (self.apply_worker and self.apply_worker.is_alive()):
+            self.btn_stop.config(state="disabled")
 
     def _align_stop(self) -> None:
         svc = self._align_service(create=False)
@@ -1394,6 +1414,7 @@ class App(tk.Tk):
                 svc = self._align_service(create=False)
                 if svc is not None and not svc.idle():
                     self.btn_stop.config(state="normal")
+            self._align_finish_if_idle()                      # nothing more to align: close its progress
         elif t == "fatal":
             self.progress.stop()
             self._set_running(False)

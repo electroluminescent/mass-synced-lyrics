@@ -392,3 +392,24 @@ def tidy(text: str | None, trim: bool = False, quotes: bool = False) -> str | No
     if trim:
         text = trim_lines(text)
     return text
+
+
+def insert_blank_lines(text: str, times) -> str:
+    """Add empty timed lines ("[mm:ss.xx]") at these times, each placed in time order: they end the
+    line before them early, leaving a gap (talk, an instrumental break) before the next lyric."""
+    times = sorted(float(t) for t in times if t is not None)
+    if not times or not text:
+        return text
+    lines = text.splitlines()
+    for t in times:
+        new = f"[{format_ts(t)}]"
+        pos = len(lines)
+        for i, line in enumerate(lines):
+            m = LINE_TS_RE.match(line)
+            if m:
+                first = TS_RE.search(m.group(0))
+                if first and _ts_to_seconds(first) > t:
+                    pos = i
+                    break
+        lines.insert(pos, new)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")

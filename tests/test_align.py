@@ -255,3 +255,68 @@ def test_install_step_reports_pip_progress_and_stops_on_cancel(tmp_path):
     threading.Timer(0.5, cancel.set).start()
     rc, _ = ai_align._run_step([sys.executable, str(script), "slow"], logged.append, cancel, lambda f, d: None)
     assert rc != 0 and time.monotonic() - t0 < 10                 # killed, not waited out
+
+
+def _words(text, start, step=0.3, prob=0.95):
+    out, t = [], start
+    for w in text.split():
+        out.append([" " + w, round(t, 2), round(t + step - 0.02, 2), prob])
+        t += step
+    return out
+
+
+LIVE = ("[00:10.00]Paper boats along the canal\n[00:14.00]Carry every name I knew\n"
+        "[00:18.00]Lanterns on the water fall\n[00:22.00]And the river takes them through\n"
+        "[00:26.00]Morning comes with copper light\n[00:30.00]Every window turning gold\n")
+
+
+def test_live_recording_talk_is_skipped_and_lines_go_where_they_are_sung():
+    # live: the band talks at 25 s, and the second half comes 20 s later than in the studio timing
+    transcript = (_words("Paper boats along the canal", 11.0) + _words("Carry every name I knew", 15.0)
+                  + _words("Lanterns on the water fall", 19.0) + _words("And the river takes them through", 23.0)
+                  + _words("thank you so much London this one is for the river", 28.0, prob=0.9)
+                  + _words("Morning comes with copper light", 46.0) + _words("Every window turning gold", 50.0))
+    # forced alignment, fooled by the talk: puts "Morning…" on it
+    segs = [{"start": t, "words": _words(b, t)} for t, b in
+            [(11.0, "Paper boats along the canal"), (15.0, "Carry every name I knew"),
+             (19.0, "Lanterns on the water fall"), (23.0, "And the river takes them through"),
+             (28.5, "Morning comes with copper light"), (50.0, "Every window turning gold")]]
+    res = {"ok": True, "language": "en", "segments": segs, "transcript": transcript}
+    out = ai_align.evaluate(LIVE, res, 60.0, 70)
+    assert out.ok and out.verify == 100.0 and out.details["method"] == "heard"
+    lines = [(t, b) for t, b in lrc.display_lines(out.text)]
+    times = {b: t for t, b in lines if b}
+    assert times["Paper boats along the canal"] == 11.0                  # both agree: forced onset
+    assert abs(times["Morning comes with copper light"] - 46.0) < 0.1    # transcript wins over the talk
+    assert abs(times["Every window turning gold"] - 50.0) < 0.1
+    gaps = [t for t, b in lines if not b]
+    assert len(gaps) == 1 and 24 < gaps[0] < 26                         # the talk sits in a gap
+    assert out.ends == {lrc.pin_key(22.0): gaps[0]}
+    assert all(0.9 <= c <= 1.0 for c in out.line_conf.values())
+    # the verify score is about lyric words actually sung, not just any sound
+    wrong = dict(res, transcript=_words("completely different words sung over the whole song tonight", 10, 3))
+    bad = ai_align.evaluate(LIVE, wrong, 60.0, 70)
+    assert not bad.ok and bad.verify < 20 and "sung" in bad.reason
+
+
+def test_words_stretched_over_silence_are_not_used_for_line_starts():
+    tr = [[" Paper", 2.0, 10.9, 0.6]] + _words("boats along the canal", 11.3) + \
+        _words("Carry every name I knew", 15.0) + _words("Lanterns on the water fall", 19.0) + \
+        _words("And the river takes them through", 23.0) + _words("Morning comes with copper light", 27.0) + \
+        _words("Every window turning gold", 31.0)
+    out = ai_align.evaluate(LIVE, {"ok": True, "segments": [], "transcript": tr}, 60.0, 70)
+    first = lrc.display_lines(out.text)[0][0]
+    assert 10.9 <= first <= 11.1
+
+
+def test_match_transcript_skips_adlibs():
+    lines = ["Paper boats along the canal", "Carry every name I knew"]
+    tr = _words("yeah yeah come on", 1.0) + _words("Paper boats along the canal", 5.0) + \
+        _words("whoa oh", 7.0) + _words("Carry every name I knew", 9.0)
+    m = ai_align.match_transcript(lines, tr)
+    assert [len(x) for x in m] == [5, 5] and m[0][0][1] == 5.0 and m[1][0][1] == 9.0
+
+
+def test_insert_blank_lines_keeps_time_order():
+    out = lrc.insert_blank_lines("[00:01.00]a\n[00:05.00]b\n", [3.0, 9.0])
+    assert out == "[00:01.00]a\n[00:03.00]\n[00:05.00]b\n[00:09.00]\n"

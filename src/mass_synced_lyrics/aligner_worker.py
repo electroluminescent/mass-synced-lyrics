@@ -141,7 +141,18 @@ class Worker:
             segs.append({"start": float(s.start), "end": float(s.end),
                          "words": [[w.word, float(w.start), float(w.end), float(w.probability or 0.0)]
                                    for w in (s.words or [])]})
-        return {"ok": True, "language": lang, "segments": segs}
+        out = {"ok": True, "language": lang, "segments": segs}
+        if req.get("transcribe", True):
+            # What was actually sung or said, word by word: lets the app tell the lyrics apart from
+            # ad-libs and talk (live recordings), which forced alignment alone can't.
+            try:
+                tr = self.whisper.transcribe(audio, language=lang, word_timestamps=True, regroup=False,
+                                             condition_on_previous_text=False, verbose=None)
+                out["transcript"] = [[w.word, float(w.start), float(w.end), float(w.probability or 0.0)]
+                                     for seg in tr.segments for w in (seg.words or [])]
+            except Exception as e:                  # the alignment is still usable without it
+                out["transcript_error"] = f"{type(e).__name__}: {e}"
+        return out
 
 
 def _apply(model, mix, device):

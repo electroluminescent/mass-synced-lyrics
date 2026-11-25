@@ -96,9 +96,13 @@ FOUND_STATUSES = {"proposed", "chosen", "locked", "aligned"}
 
 
 RULER_H = 16
-OV_HEARD_Y, OV_RULER_Y = 76, 84          # overview: heard-words lane (6 px), ruler
-SC_CUR_Y, SC_NEW_Y = 76, 95              # scrolling waveform: Current / New lanes (17 px each)
-SC_HEARD_Y, SC_RULER_Y = 114, 126        # scrolling waveform: heard-words lane (10 px), ruler
+OV_EDIT_Y, OV_RULER_Y = 76, 88           # overview: edited-lyrics lane (10 px), ruler
+SC_CUR_Y, SC_NEW_Y = 76, 95              # scrolling waveform: Current / found lyrics lanes (17 px each)
+SC_EDIT_Y, SC_RULER_Y = 114, 133         # scrolling waveform: edited-lyrics lane (17 px), ruler
+SC_LANE_Y = {"cur": SC_CUR_Y, "new": SC_NEW_Y, "edit": SC_EDIT_Y}
+EDIT_A, EDIT_B, EDIT_ON = "#6f5596", "#7f66a8", "#cdb5f0"   # edited lane: lines that moved with others
+EDIT_USER = "#e2bd55"                    # edited lane: times you set (yellow, like the list)
+EDGE_PX = 6                              # how close to a lyric's edge a press resizes it
 HEARD_LO, HEARD_HI = "#3d2a55", "#d58cff"   # heard words: low → high confidence
 RULER_FG, RULER_TICK = "#9aa0a6", "#5f6368"
 
@@ -160,6 +164,86 @@ def heard_color(p: float) -> str:
     return "#%02x%02x%02x" % tuple(int(a + (b - a) * p) for a, b in zip(lo, hi))
 
 
+def resize_lyric(times: list, texts: list, idx: int, edge: str, t: float, duration: float) -> dict:
+    """New times after dragging the start or end of lyric `idx` to `t`. Rows are the New list's
+    lines in time order; empty rows are gaps. Returns {row: new time}; ("end", idx): time for a new
+    gap right after the lyric; ("stop", idx): the first row left untouched after a push.
+    - Start: moves only this lyric (between the previous line and its own end).
+    - End, when a gap follows: the gap's start moves; if the gap is used up, the lyrics after it are
+      pushed later (ripple) until the next gap absorbs the rest.
+    - End, when the next lyric follows directly: later makes the following lyrics ripple later until
+      a gap absorbs it; earlier opens a new gap instead of moving the next lyric."""
+    n = len(times)
+    out: dict = {}
+
+    def gap(i):
+        return not (texts[i] or "").strip()
+    if edge == "start":
+        lo = (times[idx - 1] + 0.05) if idx > 0 else 0.0
+        hi = (times[idx + 1] - 0.1) if idx + 1 < n else duration - 0.1
+        out[idx] = round(max(lo, min(t, hi)), 2)
+        return out
+    e = max(times[idx] + 0.1, min(t, duration))
+    nxt = idx + 1
+    if nxt >= n:                                           # the last line: give it an end
+        if e < duration - 0.05:
+            out[("end", idx)] = round(e, 2)
+        return out
+
+    def push(j, shift):
+        m = j
+        while m < n and shift > 0.005:
+            if gap(m):
+                new = times[m] + shift
+                after = m + 1
+                limit = (times[after] - 0.05) if after < n else duration
+                out[m] = round(min(new, duration - 0.01), 2)
+                if new <= limit:
+                    out[("stop", idx)] = after if after < n else None
+                    return
+                shift = new - times[after] + 0.01
+                m = after
+                continue
+            out[m] = round(min(times[m] + shift, duration - 0.05), 2)
+            m += 1
+        if m < n:
+            out[("stop", idx)] = m
+
+    if gap(nxt):
+        after = nxt + 1
+        limit = (times[after] - 0.05) if after < n else duration
+        if e <= limit:
+            out[nxt] = round(max(times[idx] + 0.1, e), 2)
+        else:
+            out[nxt] = round(e, 2)
+            push(after, e - times[after] + 0.01)
+    elif e < times[nxt] - 0.05:
+        out[("end", idx)] = round(e, 2)                    # shorter: open a gap, the next lyric stays
+    elif e > times[nxt]:
+        push(nxt, e - times[nxt])
+    return out
+
+
+def _diff_as_edits(orig: str, aligned: str) -> dict:
+    """Older alignments kept only the result: express it as fixed times (pins) for the lines that
+    moved, plus end marks for the empty lines it added, on top of the original timing."""
+    o = [(t, b) for t, b in lrcmod.display_lines(orig) if t is not None]
+    a = [(t, b) for t, b in lrcmod.display_lines(aligned) if t is not None]
+    pins, ends = {}, {}
+    j = 0
+    last_lyric = None
+    for t, b in a:
+        if j < len(o) and (b.strip() == o[j][1].strip()):
+            if abs(t - o[j][0]) > 0.005:
+                pins[lrcmod.pin_key(o[j][0])] = round(t, 2)
+            if b.strip():
+                last_lyric = o[j][0]
+            j += 1
+        elif not b.strip() and last_lyric is not None:     # an empty line the aligner added
+            ends[lrcmod.pin_key(last_lyric)] = round(t, 2)
+    return {"pins": pins, "ends": ends, "mode": "fixed", "confs": {}}
+
+
 class Tooltip:
     def __init__(self, widget: tk.Widget):
         self.widget = widget
@@ -219,6 +303,12 @@ class ReviewTab(ttk.Frame):
         self.edited: set[str] = set()             # pins whose time was typed / set by the user
         self.interpolate = False                  # unpinned lines follow a warp through the pins
         self.ai_keys: set[str] = set()            # pins placed by the GPU aligner
+        self.end_marks: dict[str, float] = {}     # lyric key -> time it ends early (a gap after it)
+        self.ai_ends: set[str] = set()            # ... of those, the ones the aligner set
+        self.ai_conf: dict[str, float] = {}       # lyric key -> 0-1 how surely the aligner heard it
+        self._marker_rows: dict[int, str] = {}    # New-list row of an end mark -> its lyric key
+        self.orig_segs: list = []                 # the found lyrics as found (lane 2)
+        self._resize = None                       # an edge being dragged in the timeline
         self.warp_mode = "slope"                  # how unpinned lines follow (ripple when Ripple changes is on)
         self.heard_by_cand: dict[str, list] = {}  # candidate key -> words the aligner heard
         self._lanes_ver = 0                       # bumped whenever a lane's contents change
@@ -1778,17 +1868,24 @@ class ReviewTab(ttk.Frame):
             self.interpolate = bool(restore.get("interpolate")) and bool(self.pins)
             self.ai_keys = set(restore.get("ai") or []) & set(self.pins)
             self.warp_mode = restore.get("mode") or "slope"
+            self.end_marks = {k: float(v) for k, v in (restore.get("ends") or {}).items()}
+            self.ai_ends = set(restore.get("ai_ends") or []) & set(self.end_marks)
+            self.ai_conf = {k: float(v) for k, v in (restore.get("ai_conf") or {}).items()}
             self._set_timing(restore.get("offset", 0.0), restore.get("factor", 1.0))
         else:
             self.pins, self.edited, self.interpolate = {}, set(), False
             self.ai_keys, self.warp_mode = set(), "slope"
+            self.end_marks, self.ai_ends, self.ai_conf = {}, set(), {}
             ad = getattr(self.cand, "ai_detail", None)
             if ad:                     # aligned while finding: show it as the aligner's edits on the original
                 self.pins = dict(ad["pins"])
                 self.edited = set(ad["pins"])
                 self.ai_keys = set(ad["pins"])
-                self.interpolate = bool(self.pins)
-                self.warp_mode = ad.get("mode") or "slope"
+                self.interpolate = bool(self.pins) and ad.get("mode") != "fixed"
+                self.warp_mode = ad.get("mode") if ad.get("mode") in ("slope", "ripple") else "slope"
+                self.end_marks = dict(ad.get("ends") or {})
+                self.ai_ends = set(self.end_marks)
+                self.ai_conf = dict(ad.get("confs") or {})
             self._set_timing(0.0, 1.0)
         self._recompute()
 
@@ -1820,10 +1917,22 @@ class ReviewTab(ttk.Frame):
         self._recompute_job = None
         c = self.cand
         text = c.text if c else None
-        self.orig_lines = lrcmod.display_lines(text) if text and c.synced else []
+        self._marker_rows = {}
+        self.orig_segs = lrcmod.segments(self.app.settings.tidy(text), self._duration()) \
+            if text and c.synced else []
         if text and c.synced:
-            text = lrcmod.retime(text, self.offset, self.factor, self.pins, self._warping(), mode=self._mode(),
-                                 duration=self._duration() or None)
+            plain = lrcmod.display_lines(text)
+            marked, keys = self._with_end_marks(text, plain)
+            self.orig_lines = lrcmod.display_lines(marked)
+            for i, (t, b) in enumerate(self.orig_lines):
+                k = keys.get(lrcmod.pin_key(t)) if t is not None and not b.strip() else None
+                if k is not None:
+                    self._marker_rows[i] = k
+            timed = lrcmod.retime(text, self.offset, self.factor, self.pins, self._warping(), mode=self._mode(),
+                                  duration=self._duration() or None)
+            text = lrcmod.insert_blank_lines(timed, self._end_mark_times(plain, lrcmod.display_lines(timed)))
+        else:
+            self.orig_lines = []
         if text:
             text = self.app.settings.tidy(text)           # show exactly what would be written
         self._style_interp()
@@ -1850,6 +1959,39 @@ class ReviewTab(ttk.Frame):
         self._draw_cp_buttons()
         self._save_prefs_later()
 
+    # -- end marks: a lyric that ends before the next one starts (a gap: talk, a break)
+    def _with_end_marks(self, text: str, plain) -> tuple[str, dict]:
+        """The found lyrics with an empty line right after each lyric that has an end mark (at its
+        original time + 0.01 s), so New-list rows and original lines stay one-to-one."""
+        if not self.end_marks:
+            return text, {}
+        times = [t for t, _ in plain if t is not None]
+        ins, keys = [], {}
+        for i, t in enumerate(times):
+            k = lrcmod.pin_key(t)
+            if k in self.end_marks and (i + 1 >= len(times) or times[i + 1] - t > 0.02):
+                ins.append(t + 0.01)
+                keys[lrcmod.pin_key(t + 0.01)] = k
+        return lrcmod.insert_blank_lines(text, ins), keys
+
+    def _end_mark_times(self, plain, timed) -> list[float]:
+        """Where each end mark goes now: its time, kept between its lyric and the next line."""
+        out = []
+        dur = self._duration() or 1e9
+        for i, ((ot, _), (nt, _)) in enumerate(zip(plain, timed)):
+            if ot is None or lrcmod.pin_key(ot) not in self.end_marks:
+                continue
+            if i + 1 < len(plain) and plain[i + 1][0] is not None and plain[i + 1][0] - ot <= 0.02:
+                continue
+            nxt = timed[i + 1][0] if i + 1 < len(timed) and timed[i + 1][0] is not None else dur
+            want = self.end_marks[lrcmod.pin_key(ot)]
+            out.append(max(nt + 0.05, min(want, nxt - 0.01)))
+        return out
+
+    def has_edits(self) -> bool:
+        return bool(self.pins or self.edited or self.end_marks or abs(self.offset) > 1e-6
+                    or abs(self.factor - 1.0) > 1e-9)
+
     def _render(self, widget: tk.Text, lines, empty: str, pins: bool = False) -> None:
         y = widget.yview()[0]
         widget.config(state="normal")
@@ -1857,14 +1999,19 @@ class ReviewTab(ttk.Frame):
         if not lines:
             widget.insert("end", empty, "ts")
         for i, (t, txt) in enumerate(lines):
-            if pins and t is not None:
+            if pins and t is not None and i in self._marker_rows:
+                widget.insert("end", "   ", ("pin", "unpinned"))
+                widget.insert("end", " ")
+            elif pins and t is not None:
                 pinned = i < len(self.orig_lines) and lrcmod.pin_key(self.orig_lines[i][0]) in self.pins
                 widget.insert("end", "📌" if pinned else " ○ ", ("pin", "pinned" if pinned else "unpinned"))
                 widget.insert("end", " ")
             if t is not None:
                 key = lrcmod.pin_key(self.orig_lines[i][0]) if pins and i < len(self.orig_lines) else None
                 tags = ("ts",)
-                if key in self.ai_keys and key in self.pins:
+                if i in self._marker_rows:
+                    tags = ("ts", "ai_edited" if self._marker_rows[i] in self.ai_ends else "edited")
+                elif key in self.ai_keys and key in self.pins:
                     tags = ("ts", "ai_edited")
                 elif key in self.edited:
                     tags = ("ts", "edited")
@@ -1929,6 +2076,7 @@ class ReviewTab(ttk.Frame):
             self.pins.pop(k, None)
         self.edited = set()
         self.ai_keys = set()
+        self.end_marks, self.ai_ends, self.ai_conf = {}, set(), {}
         if not self.pins:
             self.interpolate = False
         self._recompute()
@@ -1953,7 +2101,7 @@ class ReviewTab(ttk.Frame):
 
     def toggle_pin(self, idx: int) -> None:
         """Pin / unpin a New-pane line at its current time."""
-        if not (0 <= idx < len(self.orig_lines)) or idx >= len(self.new_lines):
+        if not (0 <= idx < len(self.orig_lines)) or idx >= len(self.new_lines) or idx in self._marker_rows:
             return
         key = lrcmod.pin_key(self.orig_lines[idx][0])
         if key in self.pins:
@@ -1968,6 +2116,8 @@ class ReviewTab(ttk.Frame):
 
     # ---------------------------------------------------- editing timestamps
     def _line_key(self, idx: int) -> str | None:
+        if idx in self._marker_rows:
+            return "end:" + self._marker_rows[idx]
         if 0 <= idx < len(self.orig_lines):
             return lrcmod.pin_key(self.orig_lines[idx][0])
         return None
@@ -1976,6 +2126,15 @@ class ReviewTab(ttk.Frame):
         """Give line `idx` of the New pane a fixed time; None resets it to the computed time."""
         key = self._line_key(idx)
         if key is None:
+            return
+        if key.startswith("end:"):                # the end of a lyric (a gap after it)
+            k = key[4:]
+            self.ai_ends.discard(k)
+            if seconds is None:
+                self.end_marks.pop(k, None)
+            else:
+                self.end_marks[k] = max(0.0, float(seconds))
+            self._recompute()
             return
         self.ai_keys.discard(key)                 # a time set by hand is the user's own
         if seconds is None:
@@ -2102,15 +2261,28 @@ class ReviewTab(ttk.Frame):
         self.anchors = []
         self.pins, self.edited, self.interpolate = {}, set(), False
         self.ai_keys = set()
+        self.end_marks, self.ai_ends, self.ai_conf = {}, set(), {}
         self._set_timing(0.0, 1.0)
         self._recompute()
 
     # ============================================================ GPU alignment
-    def heard(self) -> list:
-        """Words the aligner heard for the lyrics being shown: [[word, start, end, probability], ...]."""
-        if self.cand is None:
-            return []
-        return self.heard_by_cand.get(self.cand.key, [])
+    def edited_segs(self) -> list:
+        """The edited lyrics as lane segments (none while nothing has been changed)."""
+        return self.new_segs if self.has_edits() else []
+
+    def _edit_colours(self) -> list[str]:
+        """Edited lane: aligner-placed lines shaded by how surely they were heard, your own times
+        yellow, lines that only moved along in purple."""
+        out = []
+        for i, sg in enumerate(self.new_segs):
+            key = self._line_key(i) if i < len(self.orig_lines) else None
+            if key in self.ai_keys:
+                out.append(heard_color(self.ai_conf.get(key, 0.8)))
+            elif key in self.edited:
+                out.append(EDIT_USER)
+            else:
+                out.append(EDIT_A if i % 2 == 0 else EDIT_B)
+        return out
 
     def _ripple_on(self) -> bool:
         return bool(self.v_ripple.get()) if hasattr(self, "v_ripple") else False
@@ -2145,17 +2317,20 @@ class ReviewTab(ttk.Frame):
                 st.close()
         except Exception:
             det = None
-        if not det or not det.get("heard"):
+        if not det or not det["ok"] or not det.get("text"):
             return
+        orig = det.get("orig") or ""
+        if not orig:                               # aligned by 1.2.1: rebuild from the kept original timing
+            o = next((c for c in self.cands if c.key.endswith("-original") and c.text), None)
+            if o is None:
+                return
+            orig = o.text
+            det = dict(det, **_diff_as_edits(orig, det["text"]))
+            det["orig"] = orig
         for c in self.cands:
-            if not c.text:
-                continue
-            if det["ok"] and det["orig"] and det["text"] and lrcmod.same_lyrics(c.text, det["text"]):
-                c.text = det["orig"]               # same result, shown as edits on the original timing
+            if c.text and lrcmod.same_lyrics(c.text, det["text"]):
+                c.text = orig                      # same result, shown as edits on the original timing
                 c.ai_detail = det
-                self.heard_by_cand[c.key] = det["heard"]
-            elif det["orig"] and lrcmod.same_lyrics(c.text, det["orig"]):
-                self.heard_by_cand[c.key] = det["heard"]
 
     def auto_align(self) -> None:
         """Auto-align (GPU) button: align the lyrics in the New pane to this song's vocals."""
@@ -2206,11 +2381,8 @@ class ReviewTab(ttk.Frame):
             return
         minimum = float(getattr(self.app.settings, "ai_align_min", 70))
         out = ai_align.evaluate(self.cand.text, res, self._duration() or None, minimum, self._mode())
-        self.heard_by_cand[self.cand.key] = out.heard
         if not out.ok:
-            self._lanes_ver += 1
-            self._draw_overview()
-            self.v_ai_note.set(f"Not applied — {out.reason}. The purple lane shows what was heard.")
+            self.v_ai_note.set(f"Not applied — {out.reason}.")
             return
         mine = self.edited - self.ai_keys                 # times you set yourself stay as they are
         for k in list(self.ai_keys):
@@ -2224,6 +2396,14 @@ class ReviewTab(ttk.Frame):
             self.pins[k] = v
             self.edited.add(k)
             self.ai_keys.add(k)
+        for k in list(self.ai_ends):
+            self.end_marks.pop(k, None)
+        self.ai_ends = set()
+        for k, v in (out.ends or {}).items():
+            if k not in self.end_marks:
+                self.end_marks[k] = v
+                self.ai_ends.add(k)
+        self.ai_conf = dict(out.line_conf or {})
         self.interpolate = True
         if not self._ripple_on():
             self.warp_mode = "slope"
@@ -2309,10 +2489,17 @@ class ReviewTab(ttk.Frame):
 
     def _sc_press(self, e) -> None:
         self._grab_keys()
+        edge = self._edge_at(e.x, e.y)
+        if edge is not None:
+            self._resize_start(edge)
+            return
         if self.audio is not None:
             self._sc_drag = {"x": e.x, "pos": self.player.position(), "moved": False}
 
     def _sc_motion(self, e) -> None:
+        if self._resize is not None:
+            self._resize_move(e)
+            return
         d = self._sc_drag
         if d is None or self.audio is None:
             return
@@ -2323,9 +2510,98 @@ class ReviewTab(ttk.Frame):
             self.player.seek(d["pos"] - (e.x - d["x"]) / w * WINDOW)   # drag the waveform like tape
 
     def _sc_release(self, e) -> None:
+        if self._resize is not None:
+            self._resize_move(e, final=True)
+            self._resize = None
+            return
         d, self._sc_drag = self._sc_drag, None
         if d is not None and not d["moved"]:
             self._sc_click(e)
+
+    # -- resizing lyrics in the timeline
+    def _sc_time(self, x: int) -> float:
+        sc = getattr(self, "_scene", None)
+        if not sc:
+            return 0.0
+        return (self.sc.canvasx(x) - sc["pad"]) / sc["pps"]
+
+    def _edge_at(self, x: int, y: int):
+        """(row in the New list, "start" | "end") when (x, y) is on the edge of a lyric in the lane that
+        shows the lyrics as they will be written, else None."""
+        sc = getattr(self, "_scene", None)
+        if not sc or self.song is None or not self.orig_lines:
+            return None
+        y0 = SC_EDIT_Y if self.has_edits() else SC_NEW_Y
+        if not y0 <= y <= y0 + 17:
+            return None
+        wx, pad, pps = self.sc.canvasx(x), sc["pad"], sc["pps"]
+        best = None
+        for i, sg in enumerate(self.new_segs):
+            if not sg.text.strip():
+                continue
+            for edge, tx in (("end", sg.end), ("start", sg.start)):
+                d = abs(wx - (pad + tx * pps))
+                if d <= EDGE_PX and (best is None or d < best[0]):
+                    best = (d, i, edge)
+        return (best[1], best[2]) if best else None
+
+    def _resize_start(self, edge) -> None:
+        self.player.pause()
+        self._resize = {"edge": edge, "snap": (dict(self.pins), set(self.edited), dict(self.end_marks),
+                                               set(self.ai_keys), set(self.ai_ends)),
+                        "times": [t for t, _ in self.new_lines], "texts": [b for _, b in self.new_lines],
+                        "last": 0.0, "pending": None}
+
+    def _resize_move(self, e, final: bool = False) -> None:
+        r = self._resize
+        t = round(self._sc_time(e.x), 2)
+        r["pending"] = t
+        now = time.monotonic()
+        if not final and now - r["last"] < 0.035:          # ~30 updates a second while dragging
+            if not r.get("job"):
+                r["job"] = self.after(40, lambda: self._resize_apply(r))
+            return
+        self._resize_apply(r)
+        if final:
+            self._save_prefs_later()
+
+    def _resize_apply(self, r) -> None:
+        r["job"] = None
+        if r is not self._resize or r["pending"] is None:
+            return
+        r["last"] = time.monotonic()
+        pins, edited, ends, ai_keys, ai_ends = r["snap"]
+        self.pins, self.edited, self.end_marks = dict(pins), set(edited), dict(ends)
+        self.ai_keys, self.ai_ends = set(ai_keys), set(ai_ends)
+        idx, edge = r["edge"]
+        changes = resize_lyric(r["times"], r["texts"], idx, edge, r["pending"], self._duration() or 1e9)
+        for i, v in changes.items():
+            if not isinstance(i, int):
+                continue
+            key = self._line_key(i)
+            if key is None:
+                continue
+            if key.startswith("end:"):
+                k = key[4:]
+                self.end_marks[k] = v
+                self.ai_ends.discard(k)
+            else:
+                self.pins[key] = v
+                self.edited.add(key)
+                self.ai_keys.discard(key)
+        new_end = changes.get(("end", idx))
+        if new_end is not None:                            # a new gap right after the lyric
+            k = self._line_key(idx)
+            if k and not k.startswith("end:"):
+                self.end_marks[k] = new_end
+                self.ai_ends.discard(k)
+        if self._warping():                                # keep the warp from moving lines past the gap
+            stop = changes.get(("stop", idx))
+            if isinstance(stop, int):
+                k = self._line_key(stop)
+                if k and not k.startswith("end:") and k not in self.pins:
+                    self.pins[k] = r["times"][stop]
+        self._recompute()
 
     def _sc_click(self, e) -> None:
         if self.audio is None:
@@ -2452,7 +2728,9 @@ class ReviewTab(ttk.Frame):
             return
         prefs = {"cand": self.cand.key if self.cand else "", "offset": self.offset, "factor": self.factor,
                  "pins": dict(self.pins), "edited": sorted(self.edited), "interpolate": self.interpolate,
-                 "ai": sorted(self.ai_keys & set(self.pins)), "mode": self.warp_mode}
+                 "ai": sorted(self.ai_keys & set(self.pins)), "mode": self.warp_mode,
+                 "ends": dict(self.end_marks), "ai_ends": sorted(self.ai_ends & set(self.end_marks)),
+                 "ai_conf": dict(self.ai_conf)}
         if self.cp_custom:
             prefs["checkpoints"] = self.checkpoints
         if prefs != (self.song.prefs or {}):
@@ -2466,8 +2744,9 @@ class ReviewTab(ttk.Frame):
     def _draw_overview(self) -> None:
         c = self.ov
         c.delete("all")
-        self._ov_lane_items = {"cur": [], "new": []}
-        self._ov_active = {"cur": -1, "new": -1}
+        self._ov_lane_items = {"cur": [], "new": [], "edit": []}
+        self._ov_lane_fill = {"cur": [], "new": [], "edit": []}
+        self._ov_active = {"cur": -1, "new": -1, "edit": -1}
         w, h = max(2, c.winfo_width()), int(c.cget("height"))
         dur = self._duration()
         if not dur:
@@ -2485,20 +2764,24 @@ class ReviewTab(ttk.Frame):
             self._ov_photo = tk.PhotoImage(master=c, width=w, height=hh, format="PPM",
                                            data=f"P6 {w} {hh} 255 ".encode() + img.tobytes())
             c.create_image(0, 0, image=self._ov_photo, anchor="nw")
-        for which, segs, y0, cols in (("cur", self.cur_segs, 52, (CUR_A, CUR_B)),
-                                      ("new", self.new_segs, 64, (NEW_A, NEW_B))):
+        edit_cols = self._edit_colours()
+        for which, segs, y0, fills in (
+                ("cur", self.cur_segs, 52, [(CUR_A, CUR_B)[i % 2] for i in range(len(self.cur_segs))]),
+                ("new", self.orig_segs, 64, [(NEW_A, NEW_B)[i % 2] for i in range(len(self.orig_segs))]),
+                ("edit", self.edited_segs(), OV_EDIT_Y, edit_cols)):
             for i, sg in enumerate(segs):
+                fill = fills[i] if i < len(fills) else NEW_A
+                if not sg.text.strip():                    # an empty line: a gap, not drawn
+                    self._ov_lane_items[which].append(None)
+                    self._ov_lane_fill[which].append(fill)
+                    continue
                 x0, x1 = sg.start / dur * w, max(sg.start / dur * w + 1, sg.end / dur * w - 1)
-                item = c.create_rectangle(x0, y0, x1, y0 + 10, fill=cols[i % 2], outline="")
+                item = c.create_rectangle(x0, y0, x1, y0 + 10, fill=fill, outline="")
                 self._ov_lane_items[which].append(item)
+                self._ov_lane_fill[which].append(fill)
                 for ws, _, _ in sg.words[1:]:
                     xw = ws / dur * w
                     c.create_line(xw, y0, xw, y0 + 10, fill=BG)
-        heard = self.heard()
-        for wd, ws, we, pr in heard:
-            x0 = ws / dur * w
-            c.create_rectangle(x0, OV_HEARD_Y, max(x0 + 1, we / dur * w - 0.5), OV_HEARD_Y + 6,
-                               fill=heard_color(pr), outline="")
         _draw_ruler(c, 0.0, dur, lambda t: t / dur * w, OV_RULER_Y, w)
         for i, t in enumerate(self.checkpoints):
             x = t / dur * w
@@ -2548,11 +2831,16 @@ class ReviewTab(ttk.Frame):
         c.delete("lane")
         pad, pps = sc["pad"], sc["pps"]
         sc["lane_items"] = {}
+        edit_cols = self._edit_colours()
         for which, segs, y0, cols, on in (("cur", self.cur_segs, SC_CUR_Y, (CUR_A, CUR_B), CUR_ON),
-                                          ("new", self.new_segs, SC_NEW_Y, (NEW_A, NEW_B), NEW_ON)):
+                                          ("new", self.orig_segs, SC_NEW_Y, (NEW_A, NEW_B), NEW_ON),
+                                          ("edit", self.edited_segs(), SC_EDIT_Y, (EDIT_A, EDIT_B), EDIT_ON)):
             for i, sg in enumerate(segs):
+                if not sg.text.strip():                    # an empty line: a gap, not drawn
+                    continue
                 x0, x1 = pad + sg.start * pps, pad + sg.end * pps - 1
-                c.create_rectangle(x0, y0, x1, y0 + 17, fill=cols[i % 2], outline="", tags=("lane", "lanebg"))
+                fill = edit_cols[i] if which == "edit" and i < len(edit_cols) else cols[i % 2]
+                c.create_rectangle(x0, y0, x1, y0 + 17, fill=fill, outline="", tags=("lane", "lanebg"))
             prog = c.create_rectangle(0, y0, 0, y0 + 17, fill=on, outline="", state="hidden",
                                       tags=("lane", "laneprog"))
             for sg in segs:
@@ -2566,7 +2854,7 @@ class ReviewTab(ttk.Frame):
             for sg in segs:
                 x0, x1 = pad + sg.start * pps, pad + sg.end * pps - 1
                 room = int((x1 - x0) / 7)
-                if room > 2:
+                if room > 2 and sg.text.strip():
                     txt = sg.text if len(sg.text) <= room else sg.text[: max(1, room - 1)] + "…"
                     texts.append(c.create_text(x0 + 3, y0 + 9, text=txt, anchor="w", fill="#111",
                                                font=("TkDefaultFont", 8), tags=("lane", "lanetext")))
@@ -2576,10 +2864,6 @@ class ReviewTab(ttk.Frame):
             sticky = c.create_text(0, y0 + 9, text="", anchor="w", fill="#111", font=("TkDefaultFont", 8),
                                    state="hidden", tags=("lane", "lanetext"))
             sc["lane_items"][which] = (segs, prog, word, texts, sticky)
-        for wd, ws, we, pr in self.heard():
-            x0, x1 = pad + ws * pps, max(pad + ws * pps + 1, pad + we * pps - 1)
-            c.create_rectangle(x0, SC_HEARD_Y, x1, SC_HEARD_Y + 10, fill=heard_color(pr), outline="",
-                               tags=("lane", "lanebg"))
         sc["sticky_hidden"] = {}
         c.tag_raise("laneprog", "lanebg")
         c.tag_raise("lanediv")
@@ -2634,7 +2918,7 @@ class ReviewTab(ttk.Frame):
                 if room > 2:
                     t = sg.text if len(sg.text) <= room else sg.text[: max(1, room - 1)] + "…"
                     c.itemconfigure(sticky, text=t, state="normal")
-                    c.coords(sticky, left + 3, (SC_CUR_Y if which == "cur" else SC_NEW_Y) + 9)
+                    c.coords(sticky, left + 3, SC_LANE_Y[which] + 9)
                 else:
                     c.itemconfigure(sticky, state="hidden")
                 c.itemconfigure(texts[j], state="hidden")
@@ -2643,12 +2927,12 @@ class ReviewTab(ttk.Frame):
                 c.itemconfigure(sticky, state="hidden")
                 sc["sticky_hidden"][which] = None
             i = lrcmod.segment_at(segs, pos)
-            if i < 0:
+            if i < 0 or not segs[i].text.strip():
                 c.itemconfigure(prog, state="hidden")
                 c.itemconfigure(word, state="hidden")
                 continue
             sg = segs[i]
-            y0 = SC_CUR_Y if which == "cur" else SC_NEW_Y
+            y0 = SC_LANE_Y[which]
             c.coords(prog, pad + sg.start * pps, y0, pad + pos * pps, y0 + 17)
             c.itemconfigure(prog, state="normal")
             wd = next(((ws, we) for ws, we, _ in sg.words if ws <= pos < we), None)
@@ -2672,7 +2956,10 @@ class ReviewTab(ttk.Frame):
             self.tooltip.hide()
             return
         parts = [fmt_time(t)]
-        for name, segs in (("Current", self.cur_segs), ("New", self.new_segs)):
+        lanes = [("Current", self.cur_segs), ("Found", self.orig_segs)]
+        if self.has_edits():
+            lanes.append(("Edited", self.new_segs))
+        for name, segs in lanes:
             i = lrcmod.segment_at(segs, t)
             if i >= 0:
                 sg = segs[i]
@@ -2680,9 +2967,16 @@ class ReviewTab(ttk.Frame):
                 parts.append(f"{name}: {sg.text}" + (f"   [{word}]" if word else ""))
             elif segs:
                 parts.append(f"{name}: —")
-        hw = next((w for w in self.heard() if w[1] <= t < w[2]), None)
-        if hw is not None:
-            parts.append(f"Heard: {hw[0].strip()}  ({hw[3] * 100:.0f}% sure)")
+        if self.has_edits():
+            i = lrcmod.segment_at(self.new_segs, t)
+            key = self._line_key(i) if 0 <= i < len(self.orig_lines) else None
+            if key in self.ai_conf:
+                parts.append(f"Aligner: {self.ai_conf[key] * 100:.0f}% sure it heard this line")
+        if e.widget is self.sc:
+            edge = self._edge_at(e.x, e.y)
+            self.sc.configure(cursor="sb_h_double_arrow" if edge else "")
+            if edge:
+                parts.append("Drag to resize this lyric (later lines move only if no gap is left)")
         parts.append("Click: jump · drag: scrub" + (" · Ctrl+click: add/remove checkpoint" if e.widget is self.ov else ""))
         self.tooltip.show("\n".join(parts), e.x_root, e.y_root)
 
@@ -2781,7 +3075,8 @@ class ReviewTab(ttk.Frame):
                 self._highlight("cur", self.txt_cur, self.cur_lines, pos)
                 self._highlight("new", self.txt_new, self.new_lines, pos)
                 self._ov_highlight("cur", self.cur_segs, pos, (CUR_A, CUR_B), CUR_ON)
-                self._ov_highlight("new", self.new_segs, pos, (NEW_A, NEW_B), NEW_ON)
+                self._ov_highlight("new", self.orig_segs, pos, (NEW_A, NEW_B), NEW_ON)
+                self._ov_highlight("edit", self.edited_segs(), pos, (EDIT_A, EDIT_B), EDIT_ON)
         finally:
             self.after(TICK_MS, self._tick)
 
@@ -2854,13 +3149,14 @@ class ReviewTab(ttk.Frame):
 
     def _ov_highlight(self, which, segs, pos, cols, on) -> None:
         i = lrcmod.segment_at(segs, pos)
-        prev = self._ov_active[which]
+        prev = self._ov_active.get(which, -1)
         if i == prev:
             return
-        items = self._ov_lane_items[which]
-        if 0 <= prev < len(items):
-            self.ov.itemconfig(items[prev], fill=cols[prev % 2])
-        if 0 <= i < len(items):
+        items = self._ov_lane_items.get(which, [])
+        fills = self._ov_lane_fill.get(which, [])
+        if 0 <= prev < len(items) and items[prev] is not None:
+            self.ov.itemconfig(items[prev], fill=fills[prev] if prev < len(fills) else cols[prev % 2])
+        if 0 <= i < len(items) and items[i] is not None:
             self.ov.itemconfig(items[i], fill=on)
         self._ov_active[which] = i
 

@@ -200,7 +200,7 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
         x = int(w * 0.55)
         x_root, y_root = 100, 100
     rv._hover(HE())
-    assert rv.tooltip.label is not None and "New: Second line" in rv.tooltip.label.cget("text")
+    assert rv.tooltip.label is not None and "Found: Second line" in rv.tooltip.label.cget("text")
     rv.tooltip.hide()
 
     # choose -> recorded only; the bottom bar writes it
@@ -842,7 +842,7 @@ def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, m
     rv.player.silent_reason = "test"
     rv.tree.selection_set(k)
     assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
-    assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0] and rv.heard() == []
+    assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0] and rv.edited_segs() == []
     ver = rv._lanes_ver
     # live plot: an edit redraws the lanes at once
     rv.set_line_time(1, 5.5)
@@ -857,11 +857,19 @@ def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, m
     assert [t for t, _ in rv.new_lines] == [2.0, 5.0, 8.0]
     assert rv.ai_keys == set(rv.pins) and len(rv.ai_keys) == 3
     assert rv.txt_new.tag_ranges("ai_edited") and "Aligned: 100% of words heard" in rv.v_ai_note.get()
-    heard = rv.heard()
-    assert heard and all(w[3] == 0.9 for w in heard)
+    # the Edited lane shows the edited lyrics, shaded by how surely each line was heard
+    assert rv.has_edits() and rv.edited_segs() and rv.ai_conf
     rv._draw_overview()
     assert any(rv.ov.itemcget(i, "fill") == review_ui_heard(0.9) for i in rv.ov.find_all()
                if rv.ov.type(i) == "rectangle")
+    # it stays after looking at another song and coming back (saved with the song)
+    rv._save_prefs()
+    rv.pins, rv.ai_keys, rv.ai_conf = {}, set(), {}
+    rv.load_song(k)
+    tok = rv._token
+    assert _pump(app, lambda: getattr(rv, "_loaded_token", 0) == tok and rv.audio is not None)
+    app.update()
+    assert rv.edited_segs() and rv.ai_conf
     # an edit by hand takes over that line; the aligner's other lines stay purple
     rv.set_line_time(2, 9.0)
     assert lrc.pin_key(7.0) not in rv.ai_keys and len(rv.ai_keys) == 2 and rv.txt_new.tag_ranges("edited")
@@ -886,7 +894,7 @@ def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, m
     app.align_service = None                                   # fresh worker reads the new env
     rv.auto_align()
     assert _pump(app, lambda: rv._align_req is None)
-    assert not rv.pins and "Not applied" in rv.v_ai_note.get() and rv.heard()
+    assert not rv.pins and "Not applied" in rv.v_ai_note.get() and not rv.has_edits()
     rv.shutdown()
     app.destroy()
 
@@ -931,7 +939,7 @@ def test_song_aligned_while_finding_opens_with_its_edits_visible(settings, tmp_p
     assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
     assert getattr(rv.cand, "ai_detail", None) is not None
     assert lrc.same_lyrics(rv.new_text, pending)                      # exactly what Apply will write
-    assert rv.ai_keys and rv.txt_new.tag_ranges("ai_edited") and rv.heard()
+    assert rv.ai_keys and rv.txt_new.tag_ranges("ai_edited") and rv.edited_segs()
     assert rv.btn_apply.cget("text").startswith("✓")                  # still the default, no choice made
     rv.clear_edits()                                                  # back to the original timing
     assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0]
@@ -1083,4 +1091,77 @@ def test_list_progress_columns_hide_columns_new_find_clears_and_remove(settings,
     app._start()
     assert not rv.rows and rv.v_count.get().startswith("0 shown")
     rv.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_player_resize_end_marks_and_edited_lane(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics.engine import Engine
+
+    lyr = "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    p = make_track(os.path.join(settings.music_folder, "a.flac"), "flac")
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib([record(synced=lyr)])).run()
+    app = new_app(settings)
+    app.geometry("1300x900")
+    rv = app.review
+    app.nb.select(rv)
+    k = state_key(p)
+    rv.add_row(k, "proposed", "lrclib", "Some Artist", "Some Song", "", "found", "online")
+    rv.player.silent_reason = "test"
+    rv.tree.selection_set(k)
+    assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
+    assert not rv.has_edits() and rv.edited_segs() == []
+    # drag the end of the first lyric earlier: a gap opens, the next lyric stays
+    rv._resize_start((0, "end"))
+    rv._resize["pending"] = 3.0
+    rv._resize_apply(rv._resize)
+    rv._resize = None
+    assert [round(t, 2) for t, _ in rv.new_lines] == [0.5, 3.0, 5.0, 7.0] and rv.new_lines[1][1] == ""
+    assert rv.has_edits() and rv.edited_segs()                     # the Edited lane is shown
+    # the gap row can be moved like a lyric, and cleared
+    rv.set_line_time(1, 4.0)
+    assert [round(t, 2) for t, _ in rv.new_lines][:3] == [0.5, 4.0, 5.0]
+    # drag the end of the second lyric later into the third: the third ripples
+    rv._resize_start((2, "end"))
+    rv._resize["pending"] = 7.5
+    rv._resize_apply(rv._resize)
+    rv._resize = None
+    assert [round(t, 2) for t, _ in rv.new_lines][-1] == 7.5
+    rv.clear_edits()
+    assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0] and not rv.end_marks
+    rv.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_align_row_finishes_when_find_ends_after_the_aligner_went_idle(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    app = new_app(settings)
+
+    class Svc:
+        paused, done, total = False, 2, 2
+        counts = {"aligned": 2}
+
+        def idle(self):
+            return True
+
+        def pending(self):
+            return 0
+
+        def reset_counts(self):
+            self.done = 0
+
+    app.align_service = Svc()
+    app.activity.set("align", "Aligning on the GPU", detail="2 done · waiting for songs from Find…")
+    assert app.activity.is_active("align")
+    app._align_finish_if_idle()
+    assert not app.activity.is_active("align") and app.align_service.done == 0
+    app.update()
+    assert "2 aligned" in app.txt.get("1.0", "end")
     app.destroy()

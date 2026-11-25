@@ -126,14 +126,22 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
 
   Interpolate and Ripple are mutually exclusive: with Ripple on, the Interpolate button shows *✓ Ripple*.
 - **Auto-align (GPU):** locates the New lyrics in this song's vocals (needs the NVIDIA add-on; see below).
-  - The words it heard are drawn as a **purple lane** under the New lyrics in both waveforms, brighter where it was more sure. Hover over the lane to see a word and its certainty.
-  - If enough words were heard (**Aligned lyrics must match**), the lines it placed get those times (purple) and the others interpolate or ripple. Times you set yourself are kept.
-  - Otherwise nothing changes, and the lane shows what was heard.
+  - If enough lyric words were heard being sung (**Aligned lyrics must match**), the lines it placed get those times (purple) and the others interpolate or ripple. Times you set yourself are kept.
+  - Otherwise nothing changes, and a note says why.
 - **Clear pins** and **Clear edits** remove them; *Reset timing* clears everything.
+
+**Lanes under the waveforms:** *Current*, *Found* (the lyrics as found) and *Edited*. The Edited lane appears whenever the timing has been changed, by you or by the aligner, and stays when you come back to the song.
+- Lines placed by the aligner are purple, brighter where they were heard more surely. Times you set are yellow.
+- Hover over a lyric to see its found and edited times and the aligner's certainty.
+
+**Resize a lyric** by dragging either edge in the scrolling waveform (the cursor changes on an edge):
+- **Start:** moves only that lyric.
+- **End, with empty time after it:** moves only the gap. Nothing after it moves until the gap is used up.
+- **End, with the next lyric right after it:** later pushes the following lyrics up to the next gap, which absorbs the change. Earlier opens a gap.
 
 The lyric lanes and the New list follow every change live, whether it comes from you or from the aligner.
 
-Songs aligned while finding open the same way: the found lyrics with the aligner's purple times on top of the original timing, plus the heard-words lane. **Clear edits** goes back to the original timing.
+Songs aligned while finding open the same way: the found lyrics with the aligner's purple times on top of the original timing. **Clear edits** goes back to the original timing.
 
 Pins, edits and checkpoints are saved per song.
 
@@ -153,9 +161,10 @@ Off by default. Switch it on under **Scores and alignment** on the Find lyrics t
 
 While **Find lyrics** runs, songs whose found lyrics are below **High confidence** or **Good fit** (and have no per-file choice) are queued and aligned one at a time on the GPU. Finding carries on meanwhile, and low-confidence songs from earlier runs are added when Find finishes. For each song:
 1. Demucs isolates the vocals.
-2. Whisper locates each lyric word in them, with a probability for each.
-3. Lines whose words were heard clearly are placed where they were heard. The rest are interpolated between them, the same as *Interpolate*.
-4. The result is **verified**: the share of the lyric's words that were clearly heard. It is kept only if it reaches **Aligned lyrics must match** (70 % by default, steps of 5 %).
+2. Whisper writes down what was actually sung or said, word by word, and also locates each lyric word.
+3. The lyrics are matched to the words heard, in order. Words that aren't in the lyrics (talk between songs, band introductions, ad-libs) are skipped, so lyrics aren't placed on them. This is what makes live recordings work.
+4. Lines that were clearly heard are placed where they were sung. The rest are interpolated between them, the same as *Interpolate*. Where the performer talks or plays without singing for a while, a gap is inserted.
+5. The result is **verified**: the share of the lyric's words heard being sung. It is kept only if it reaches **Aligned lyrics must match** (70 % by default, steps of 5 %).
 
 **If the song passes:**
 - Its found lyrics are replaced by the re-timed version, shown as **Aligned** in the list.

@@ -19,4 +19,7 @@ for raw in sys.stdin:
         dur = 1.5 / max(1, len(words))
         segs.append({"start": t, "end": t + 1.5,
                      "words": [[" " + w, t + k * dur, t + (k + 1) * dur, prob] for k, w in enumerate(words)]})
-    print(json.dumps({"id": req["id"], "ok": True, "language": "en", "segments": segs}), flush=True)
+    out = {"id": req["id"], "ok": True, "language": "en", "segments": segs}
+    if os.environ.get("FAKE_TRANSCRIPT"):        # what was "heard": the same words, plus some talk
+        out["transcript"] = [w for s in segs for w in s["words"]] + [[" thanks", 0.1, 0.4, 0.9]]
+    print(json.dumps(out), flush=True)

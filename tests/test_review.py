@@ -376,3 +376,38 @@ def test_apply_confident_plan_and_confidences_reach_the_list(settings):
     Engine(settings, events.append, lrclib=FakeLrclib([])).run()
     cached = {os.path.basename(e["result"].path): e["result"] for e in events if e["type"] == "result"}
     assert cached["a.flac"].status == "cached" and cached["a.flac"].conf_online == 100
+
+
+def test_resize_rules():
+    from mass_synced_lyrics.review_ui import resize_lyric
+    # rows: lyric 10, lyric 14 (butted), gap 17, lyric 20, lyric 24
+    times = [10.0, 14.0, 17.0, 20.0, 24.0]
+    texts = ["a", "b", "", "c", "d"]
+    # end of "a" later: "b" is butted to it, so it ripples; the gap after "b" absorbs it
+    out = resize_lyric(times, texts, 0, "end", 15.0, 60)
+    assert out[1] == 15.0 and out[2] == 18.0 and 3 not in out and out[("stop", 0)] == 3
+    # far enough to use up the gap: "c" and "d" move too
+    out = resize_lyric(times, texts, 0, "end", 18.5, 60)
+    assert out[1] == 18.5 and out[3] > 20.0 and out[4] > 24.0
+    # end of "a" earlier: a new gap opens, "b" stays
+    out = resize_lyric(times, texts, 0, "end", 12.0, 60)
+    assert out == {("end", 0): 12.0}
+    # end of "b" (gap after it): only the gap's start moves while there's room
+    out = resize_lyric(times, texts, 1, "end", 19.0, 60)
+    assert out == {2: 19.0}
+    # start of "c": only "c" moves, kept after the gap and before its own end
+    assert resize_lyric(times, texts, 3, "start", 18.0, 60) == {3: 18.0}
+    assert resize_lyric(times, texts, 3, "start", 1.0, 60) == {3: 17.05}
+    # the last lyric gets an end
+    assert resize_lyric(times, texts, 4, "end", 27.0, 60) == {("end", 4): 27.0}
+    # pushes are clamped to the song
+    out = resize_lyric([1.0, 2.0, 3.0], ["a", "b", "c"], 0, "end", 9.9, 10.0)
+    assert max(v for k, v in out.items() if isinstance(k, int)) <= 10.0
+
+
+def test_old_alignments_become_visible_edits():
+    from mass_synced_lyrics.review_ui import _diff_as_edits
+    orig = "[00:01.00]a\n[00:05.00]b\n[00:09.00]c\n"
+    aligned = "[00:01.50]a\n[00:04.00]\n[00:05.00]b\n[00:10.00]c\n"
+    d = _diff_as_edits(orig, aligned)
+    assert d["pins"] == {"1.00": 1.5, "9.00": 10.0} and d["ends"] == {"1.00": 4.0}

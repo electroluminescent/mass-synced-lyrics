@@ -67,7 +67,7 @@ class State:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
-        for col in ("orig", "pins", "heard", "mode"):   # aligned: detail for the player (1.2.2+)
+        for col in ("orig", "pins", "heard", "mode", "ends", "confs"):   # aligned: detail for the player
             try:
                 self.db.execute(f"ALTER TABLE aligned ADD COLUMN {col} TEXT DEFAULT ''")
             except sqlite3.OperationalError:
@@ -272,29 +272,34 @@ class State:
 
     def set_aligned(self, path: str, src_hash: str, ok: bool, verify: float, reason: str, text: str = "",
                     confidence: float | None = None, fit: float | None = None, kind: str = "",
-                    orig: str = "", pins: dict | None = None, heard: list | None = None, mode: str = "") -> None:
+                    orig: str = "", pins: dict | None = None, heard: list | None = None, mode: str = "",
+                    ends: dict | None = None, confs: dict | None = None) -> None:
         import json
         self.db.execute("REPLACE INTO aligned (path, src_hash, ok, verify, reason, text, confidence, fit, kind, "
-                        "updated, orig, pins, heard, mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "updated, orig, pins, heard, mode, ends, confs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (_k(path), src_hash, 1 if ok else 0, float(verify), reason, text, _f(confidence), _f(fit),
-                         kind, time.time(), orig or "", json.dumps(pins or {}), json.dumps(heard or []), mode or ""))
+                         kind, time.time(), orig or "", json.dumps(pins or {}), json.dumps(heard or []), mode or "",
+                         json.dumps(ends or {}), json.dumps(confs or {})))
         self._tick()
 
     def get_aligned_detail(self, path: str) -> dict | None:
         """Everything the player needs to show an alignment: the original timing, the aligner's
         pins, the words it heard (with probabilities) and the verify score."""
         import json
-        row = self.db.execute("SELECT ok, verify, reason, text, orig, pins, heard, mode FROM aligned WHERE path=?",
-                              (_k(path),)).fetchone()
+        row = self.db.execute("SELECT ok, verify, reason, text, orig, pins, heard, mode, ends, confs FROM aligned "
+                              "WHERE path=?", (_k(path),)).fetchone()
         if row is None:
             return None
-        try:
-            pins = json.loads(row[5] or "{}")
-            heard = json.loads(row[6] or "[]")
-        except ValueError:
-            pins, heard = {}, []
+
+        def js(v, empty):
+            try:
+                return json.loads(v) if v else empty
+            except ValueError:
+                return empty
+        pins, heard, ends, confs = js(row[5], {}), js(row[6], []), js(row[8], {}), js(row[9], {})
         return {"ok": bool(row[0]), "verify": row[1], "reason": row[2], "text": row[3] or "", "orig": row[4] or "",
-                "pins": {k: float(v) for k, v in pins.items()}, "heard": heard, "mode": row[7] or "slope"}
+                "pins": {k: float(v) for k, v in pins.items()}, "heard": heard, "mode": row[7] or "slope",
+                "ends": {k: float(v) for k, v in ends.items()}, "confs": {k: float(v) for k, v in confs.items()}}
 
     def use_aligned(self, path: str, kind: str, old_text: str, new_text: str, label: str,
                     confidence: float | None, fit: float | None) -> bool:

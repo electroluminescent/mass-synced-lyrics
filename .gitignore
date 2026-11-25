@@ -10,3 +10,5 @@ dist/
 src/mass_synced_lyrics/_buildinfo.py
 # ready-to-run app copied here by build.ps1 (published as a Release instead)
 /MassSyncedLyrics.exe
+# local test data (may hold lyrics); never committed
+.sync/
