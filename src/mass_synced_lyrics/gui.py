@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import APP_TITLE, DEFAULT_ACOUSTID_KEY, __version__, theme
-from .config import Settings, load_settings, save_settings
+from .config import Settings, load_settings, save_settings, snap5
 from .engine import STATUS_LABELS, Engine, display_path
 from .paths import state_key
 
@@ -160,10 +160,13 @@ class App(tk.Tk):
                 self.cmb_action = theme.hint(ttk.Combobox(opt, state="readonly", values=[lbl for _, lbl in LRC_ACTIONS]), 'What happens to a sidecar .lrc after its lyrics are applied: Recycle Bin, delete, or keep. A <song>.lrc that is itself the output is never removed.')
                 self.cmb_action.grid(row=r, column=1, sticky="ew")
             elif widget == "thr":
-                theme.hint(ttk.Spinbox(opt, from_=70, to=100, textvariable=self.v_threshold, width=8
-                            ), 'How closely names must match for a sidecar or collection .lrc to be used automatically. Lower finds more, higher is stricter.').grid(row=r, column=1, sticky="w")
+                sp = theme.hint(ttk.Spinbox(opt, from_=70, to=100, increment=5, textvariable=self.v_threshold,
+                                            width=8), 'How closely names must match for a sidecar or collection .lrc to be used automatically. Lower finds more, higher is stricter. Steps of 5%.')
+                sp.grid(row=r, column=1, sticky="w")
+                sp.bind("<FocusOut>", lambda e: self.v_threshold.set(self._threshold_value()), add="+")
+                sp.bind("<Return>", lambda e: self.v_threshold.set(self._threshold_value()), add="+")
             elif widget == "conf":
-                sp = theme.hint(ttk.Spinbox(opt, from_=50, to=100, textvariable=self.v_confident, width=8,
+                sp = theme.hint(ttk.Spinbox(opt, from_=50, to=100, increment=5, textvariable=self.v_confident, width=8,
                                             command=self._confident_changed),
                                 "Songs whose found lyrics match at this % or better count as high confidence: "
                                 "Apply confident writes them without asking, and Hide low confidence hides the "
@@ -172,7 +175,7 @@ class App(tk.Tk):
                 sp.bind("<FocusOut>", lambda e: self._confident_changed(), add="+")
                 sp.bind("<Return>", lambda e: self._confident_changed(), add="+")
             elif widget == "fit":
-                sp = theme.hint(ttk.Spinbox(opt, from_=0, to=100, textvariable=self.v_fit, width=8,
+                sp = theme.hint(ttk.Spinbox(opt, from_=0, to=100, increment=5, textvariable=self.v_fit, width=8,
                                             command=self._confident_changed),
                                 "Found lyrics fit the recording well at this % or better (length, lines past the end, "
                                 "spread over the song, lines on silence). Apply confident needs both High confidence "
@@ -294,9 +297,9 @@ class App(tk.Tk):
         self.v_key.set(s.acoustid_key)
         self.cmb_action.set(dict(LRC_ACTIONS).get(s.lrc_action, LRC_ACTIONS[0][1]))
         self.v_mtime.set(s.restore_mtime)
-        self.v_threshold.set(s.match_threshold)
-        self.v_confident.set(int(s.confident_threshold))
-        self.v_fit.set(int(s.confident_fit))
+        self.v_threshold.set(snap5(s.match_threshold, 70, 100))
+        self.v_confident.set(snap5(s.confident_threshold, 50, 100))
+        self.v_fit.set(snap5(s.confident_fit, 0, 100))
         self.v_fit_audio.set(bool(s.fit_audio))
         self.v_only_found.set(bool(s.only_found))
         self.v_retry.set(s.retry_misses)
@@ -316,10 +319,8 @@ class App(tk.Tk):
         label = self.cmb_action.get()
         s.lrc_action = next((k for k, v in LRC_ACTIONS if v == label), "recycle")
         s.restore_mtime = self.v_mtime.get()
-        try:
-            s.match_threshold = max(70, min(100, int(self.v_threshold.get())))
-        except (tk.TclError, ValueError):
-            s.match_threshold = 90
+        s.match_threshold = self._threshold_value()
+        self.v_threshold.set(s.match_threshold)
         s.retry_misses = self.v_retry.get()
         s.confident_threshold = self._confident_value()
         s.confident_fit = self._fit_value()
@@ -512,18 +513,39 @@ class App(tk.Tk):
 
     def _confident_value(self) -> int:
         try:
-            return max(50, min(100, int(self.v_confident.get())))
-        except (tk.TclError, ValueError):
+            return snap5(self.v_confident.get(), 50, 100)
+        except tk.TclError:
             return 95
 
     def _fit_value(self) -> int:
         try:
-            return max(0, min(100, int(self.v_fit.get())))
-        except (tk.TclError, ValueError):
+            return snap5(self.v_fit.get(), 0, 100)
+        except tk.TclError:
             return 80
+
+    def _threshold_value(self) -> int:
+        try:
+            return snap5(self.v_threshold.get(), 70, 100)
+        except tk.TclError:
+            return 90
+
+    def set_score_levels(self, confident: int | None = None, fit: int | None = None) -> None:
+        """Change the High confidence / Good fit levels (from the Find tab or the list's header filters)."""
+        if confident is not None:
+            self.v_confident.set(snap5(confident, 50, 100))
+        if fit is not None:
+            self.v_fit.set(snap5(fit, 0, 100))
+        self._confident_changed()
 
     def _confident_changed(self) -> None:
         v, f = self._confident_value(), self._fit_value()
+        for var, val in ((self.v_confident, v), (self.v_fit, f)):
+            try:
+                same = var.get() == val
+            except tk.TclError:
+                same = False
+            if not same:
+                var.set(val)
         if v == self.settings.confident_threshold and f == self.settings.confident_fit:
             return
         self.settings.confident_threshold = v

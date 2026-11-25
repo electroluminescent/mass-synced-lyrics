@@ -636,3 +636,41 @@ def test_fit_column_header_filters_folder_view_and_open_location(settings, tmp_p
         assert os.path.dirname(songs[1]) in str(calls[0])
     rv.shutdown()
     app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_score_levels_snap_to_5_and_change_from_the_list(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    from mass_synced_lyrics.config import load_settings, snap5
+    assert [snap5(x) for x in (0, 2, 3, 82, 87.5, 99, 140)] == [0, 0, 5, 80, 90, 100, 100]
+    assert snap5(40, 50, 100) == 50
+    app = new_app(settings)
+    rv = app.review
+    d = settings.music_folder
+    p = state_key(os.path.join(d, "a.flac"))
+    rv.add_row(p, "proposed", "lrclib", "A", "Song", "", "found", "online", "Al", conf_online=92.0, fit_online=77.0)
+    app.update()
+    # Find tab: typed values snap to 5
+    app.v_confident.set(92)
+    app.v_fit.set(73)
+    app._confident_changed()
+    assert (app.settings.confident_threshold, app.settings.confident_fit) == (90, 75)
+    assert (app.v_confident.get(), app.v_fit.get()) == (90, 75)
+    assert rv.tree.set(rv.tree.parent(p), "match") == ""            # 92 ≥ 90: not low
+    # from the list: the Match header popup changes the High confidence level too
+    rv._score_filter_popup("match")
+    app.update()
+    rv.set_score_level("match", 96)
+    assert app.settings.confident_threshold == 95 and app.v_confident.get() == 95
+    assert rv.tree.set(rv.tree.parent(p), "match") == "1 low"
+    rv.set_score_level("fit", 81)
+    assert app.settings.confident_fit == 80 and rv.tree.set(rv.tree.parent(p), "fit") == "1 poor"
+    rv.set_min_score("fit", 77)
+    assert app.settings.list_min_fit == 75 and rv.tree.exists(p)       # 77 ≥ 75
+    rv.set_min_score("fit", 79)
+    assert app.settings.list_min_fit == 80 and not rv.tree.exists(p)
+    assert load_settings().confident_threshold == 95                   # saved
+    rv._score_filter_popup("match")
+    rv.shutdown()
+    app.destroy()

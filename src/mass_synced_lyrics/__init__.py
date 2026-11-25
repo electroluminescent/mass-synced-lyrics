@@ -1,6 +1,6 @@
 """Mass Synced Lyrics: embed time-synced (LRC) lyrics into a music library."""
 
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 APP_NAME = "mass-synced-lyrics"
 APP_TITLE = "Mass Synced Lyrics"
 

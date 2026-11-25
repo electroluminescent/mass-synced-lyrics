@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.6
+- The score levels can be changed in steps of 5 %: **High confidence** (default 95 %), **Good fit**
+  (default 80 %) and **Match confidence** (default 90 %) on the Find lyrics tab. Typed values snap to the
+  nearest 5 %.
+- The **Match** / **Fit** header popup has a second slider for the level itself (**High confidence at ≥**
+  / **Good fit at ≥**). It's the same setting as on the Find lyrics tab, and it updates Apply confident,
+  Hide low confidence and the group counts right away.
+- The header filter sliders also move in 5 % steps (arrow keys too).
+
 ## 1.1.5
 - **Apply confident** button beside Apply writes, without asking, the found lyrics at or above both the
   **High confidence** (95 % by default) and **Good fit** (80 %) levels on the Find lyrics tab. Songs with

@@ -13,7 +13,7 @@ from . import APP_TITLE, theme
 from . import fit as fitmod
 from . import lrc as lrcmod
 from . import review
-from .config import save_settings
+from .config import save_settings, snap5
 from .engine import STATUS_LABELS, display_path
 from .paths import open_folder, reveal_in_explorer, state_key
 from .player import Player, decode, envelope, volume_gain
@@ -282,7 +282,7 @@ class ReviewTab(ttk.Frame):
         tf = ttk.Frame(left)
         tf.pack(fill="both", expand=True, pady=4)
         cols = ("status", "local", "online", "choice", "match", "fit")
-        self.min_score = {k: int(getattr(st0, attr, 0) or 0) for k, (_, attr) in SCORE_COLS.items()}
+        self.min_score = {k: snap5(getattr(st0, attr, 0) or 0) for k, (_, attr) in SCORE_COLS.items()}
         self._score_popup = None
         self.tree = ttk.Treeview(tf, columns=cols, show="tree headings", selectmode="extended")
         self.tree.heading("#0", text=VIEW_HEADINGS[self._view()])
@@ -819,7 +819,7 @@ class ReviewTab(ttk.Frame):
         self.tree.heading(col, text=f"{label} ≥{n}" if n else f"{label} ▾")
 
     def set_min_score(self, col: str, value: int, save: bool = True) -> None:
-        value = max(0, min(100, int(value)))
+        value = snap5(value)
         if self.min_score.get(col) == value:
             return
         self.min_score[col] = value
@@ -833,8 +833,24 @@ class ReviewTab(ttk.Frame):
                 pass
         self._refill()
 
+    def _score_level(self, col: str) -> int:
+        return int(self._confident_threshold() if col == "match" else self._fit_threshold())
+
+    def set_score_level(self, col: str, value: int) -> None:
+        """The level that counts as High confidence (Match) or Good fit (Fit): used by Apply confident,
+        Hide low confidence and the low/poor counts. Same setting as on the Find lyrics tab."""
+        if hasattr(self.app, "set_score_levels"):
+            if col == "match":
+                self.app.set_score_levels(confident=value)
+            else:
+                self.app.set_score_levels(fit=value)
+        else:
+            setattr(self.app.settings, "confident_threshold" if col == "match" else "confident_fit", snap5(value))
+            self._refill()
+
     def _score_filter_popup(self, col: str) -> None:
-        """Header click: a small slider that hides songs whose score is below the chosen %."""
+        """Header click: sliders (in steps of 5%) for hiding songs below a score, and for the level that
+        counts as High confidence / Good fit."""
         if self._score_popup is not None:
             try:
                 self._score_popup.destroy()
@@ -843,6 +859,8 @@ class ReviewTab(ttk.Frame):
             self._score_popup = None
             return
         label = SCORE_COLS[col][0]
+        level_name = "High confidence" if col == "match" else "Good fit"
+        lo = 50 if col == "match" else 0
         top = tk.Toplevel(self)
         top.wm_overrideredirect(True)
         try:
@@ -851,55 +869,76 @@ class ReviewTab(ttk.Frame):
             pass
         self._score_popup = top
         p = theme.palette()
-        frame = tk.Frame(top, background=p["surface"], highlightthickness=1, highlightbackground=p["border"], padx=10,
-                         pady=8)
+        frame = tk.Frame(top, background=p["surface"], highlightthickness=1, highlightbackground=p["border"],
+                         padx=10, pady=8)
         frame.pack(fill="both", expand=True)
-        var = tk.IntVar(value=self.min_score.get(col, 0))
-        cap = tk.StringVar()
 
-        def show(*_):
-            v = int(float(var.get()))
-            cap.set(f"Show {label} ≥ {v}%" if v else f"Show every {label} score")
-        tk.Label(frame, textvariable=cap, background=p["surface"], foreground=p["fg"],
-                 font=theme.font("body")).pack(anchor="w")
-        sc = ttk.Scale(frame, from_=0, to=100, orient="horizontal", length=220,
-                       command=lambda v: (var.set(int(round(float(v)))), show()))
-        sc.set(var.get())
-        sc.pack(fill="x", pady=(6, 6))
-        theme.hint(sc, f"Hide songs whose {label} score is below this. Songs without a score stay listed.")
+        def slider(caption_fn, start, lo_, apply_fn, tip):
+            var = tk.IntVar(value=snap5(start, lo_))
+            cap = tk.StringVar(value=caption_fn(var.get()))
+            tk.Label(frame, textvariable=cap, background=p["surface"], foreground=p["fg"],
+                     font=theme.font("body")).pack(anchor="w")
+            sc = ttk.Scale(frame, from_=lo_, to=100, orient="horizontal", length=240)
+
+            def moved(v):
+                snapped = snap5(float(v), lo_)
+                if snapped != var.get():
+                    var.set(snapped)
+                    cap.set(caption_fn(snapped))
+
+            sc.configure(command=moved)
+            sc.set(var.get())
+            sc.pack(fill="x", pady=(4, 8))
+            theme.hint(sc, tip)
+
+            def release(_e=None):
+                sc.set(var.get())                      # the handle rests on the 5% step
+                apply_fn(var.get())
+            sc.bind("<ButtonRelease-1>", release, add="+")
+            for key, step in (("<Left>", -5), ("<Down>", -5), ("<Right>", 5), ("<Up>", 5)):
+                sc.bind(key, lambda e, d=step: (var.set(snap5(var.get() + d, lo_)), cap.set(caption_fn(var.get())),
+                                                release(), "break")[-1])
+            return var, sc
+
+        fvar, fsc = slider(lambda v: f"Show {label} ≥ {v}%" if v else f"Show every {label} score",
+                           self.min_score.get(col, 0), 0, lambda v: self.set_min_score(col, v),
+                           f"Hide songs whose {label} score is below this (steps of 5%). Songs without a score "
+                           "stay listed.")
+        lvar, _ = slider(lambda v: f"{level_name} at ≥ {v}%", self._score_level(col), lo,
+                         lambda v: self.set_score_level(col, v),
+                         f"The {label} score that counts as {level_name}: Apply confident, Hide low confidence and "
+                         f"the group counts use it. Same setting as on the Find lyrics tab.")
         row = tk.Frame(frame, background=p["surface"])
         row.pack(fill="x")
 
-        def close(apply: bool = True):
-            if apply:
-                self.set_min_score(col, var.get())
+        def close():
+            self.set_min_score(col, fvar.get())
+            if lvar.get() != self._score_level(col):
+                self.set_score_level(col, lvar.get())
             try:
                 top.destroy()
             except tk.TclError:
                 pass
             self._score_popup = None
-        sc.bind("<ButtonRelease-1>", lambda e: self.set_min_score(col, var.get()), add="+")
-        theme.hint(ttk.Button(row, text="Clear", command=lambda: (var.set(0), sc.set(0), close())),
+        theme.hint(ttk.Button(row, text="Clear", command=lambda: (fvar.set(0), fsc.set(0), close())),
                    f"Show every {label} score again.").pack(side="left")
         theme.hint(ttk.Button(row, text="Done", command=close), "Close the filter.").pack(side="right")
         top.bind("<Escape>", lambda e: close())
         top.bind("<Return>", lambda e: close())
-        show()
         try:
             bbox_x = sum(int(self.tree.column(c, "width")) for c in ("#0",) + self.tree["columns"][
                 :list(self.tree["columns"]).index(col)])
         except (tk.TclError, ValueError):
             bbox_x = 0
-        x = self.tree.winfo_rootx() + max(0, min(bbox_x, self.tree.winfo_width() - 250))
+        x = self.tree.winfo_rootx() + max(0, min(bbox_x, self.tree.winfo_width() - 270))
         y = self.tree.winfo_rooty() + 26
         top.geometry(f"+{x}+{y}")
         top.update_idletasks()
         try:
             top.focus_force()
-            sc.focus_set()
+            fsc.focus_set()
         except tk.TclError:
             pass
-
         top.bind("<FocusOut>", lambda e: self.after(150, lambda: self._close_popup_if_unfocused(top, close)),
                  add="+")
 

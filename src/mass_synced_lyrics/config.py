@@ -72,6 +72,15 @@ def settings_path() -> str:
     return os.path.join(app_dir(), "settings.json")
 
 
+def snap5(value, lo: int = 0, hi: int = 100) -> int:
+    """Round a percentage to the nearest 5 and keep it within lo..hi."""
+    try:
+        v = int(round(float(value) / 5.0) * 5)
+    except (TypeError, ValueError):
+        v = lo
+    return max(lo, min(hi, v))
+
+
 def load_settings(path: str | None = None) -> Settings:
     path = path or settings_path()
     s = Settings()
