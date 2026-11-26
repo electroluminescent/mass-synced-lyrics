@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.9.0
+- **Four timelines, labelled:** Current, Found, **⚡ Aligned** (the GPU's timing, purple, shaded by
+  certainty) and **✎ Edited** (blue: what *Use edited* writes, the only one you can change).
+  - Select lyric bars in one timeline: click, Ctrl+click to add or remove, or drag along a timeline to
+    select a range. Ctrl+click on a bar selects; on the overview's waveform it still adds a checkpoint.
+  - Drag selected bars from Found or Aligned **down onto Edited** to use their times there.
+  - In Edited, drag selected bars left or right to move them. Stretch handles: every lyric's start,
+    and its end only when a gap or the song's end follows.
+  - **⇣ Found → Edited** (start over) and **⇣ Aligned → Edited** replace *Clear edits* and *Reset
+    timing*.
+- **What to write, per song:** **Keep current / Use found · Match % / ⚡ Use aligned · heard % / ✎ Use
+  edited**. The most worked-on level is chosen by default, and editing the Edited timeline makes it the
+  choice by itself.
+- **Song list colours** follow what will be written: Found (green), Aligned (purple), Edited (blue),
+  Not changed, Saved, Check (amber, ⚠) and Problem. The song in the player is bold with ▶.
+- **Check flag:** songs whose aligned timing is far from the found timing (≥ 3 s on a typical line),
+  or that were only partly aligned, are marked Check.
+- **Align all songs:** *⚡ Align (GPU) → Align all songs in the list*, and *⚡ Align every song, not
+  only low-confidence ones* on the Find lyrics tab.
+- **Faster GPU batches:** the worker reads the next song's audio while the GPU works on the current
+  one, and finished songs are judged, scored and stored on their own thread, so the GPU goes straight
+  on.
+- **The song you select goes first** in every running operation (Find, Align, Save).
+- **Checkpoints** are numbered in the order you made them and keep their numbers. An unset number key
+  sets that checkpoint at the needle. **`** / **~** plays the next checkpoint in the song after the
+  needle.
+- Above the needle: **⌖** moves the next lyric to the needle, and **⧉** copies the needle's time for
+  pasting into a timestamp.
+- **Insert a line before / after** or **delete** a line from the Edited pane's right-click menu.
+- **Up / Down** and **W / S** go to the previous / next song.
+- Fixed: re-selecting the song already in the player reloaded it.
+
 ## 1.8.0
 - **Fixed: the purple GPU timings didn't show for songs aligned in a batch** if you had opened the song
   in the player before. The player restored your earlier view instead. It now puts the GPU's alignment

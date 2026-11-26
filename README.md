@@ -84,29 +84,37 @@ Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hi
 - **Use Local / Use Online / Don't change** and **Reset to default.**
 - **Restore original lyrics:** gives files this app wrote to back the lyrics or `.lrc` they had before.
 
-Row colours show the action: local (gold), online (blue), custom (purple), don't change (grey), written (green), needs a look (red). Filter and search sit above the list; *Load earlier results* and *Open file…* add more songs.
+**Row colours** show what will be written: **Found** (green, the found timing), **⚡ Aligned** (purple, the GPU's timing), **✎ Edited** (blue, your Edited timeline), **Not changed** (grey), **Saved** (written by this app), **Check** (amber, ⚠: the GPU heard too little to be sure, or its timing is far from the found one) and **Problem** (red). The song in the player is **bold with ▶**. Filter and search sit above the list; *Load earlier results* and *Open file…* add more songs.
+
+**Keys:** **Up / Down** or **W / S** go to the previous / next song in the list (and open it in the player), unless you're typing in a box.
+
+**The song you select goes first:** while Find, Align or Save is running, selecting a song moves it to the front of their queues, so you can deal with it straight away.
 
 **Player:**
 
-- **Overview waveform** of the whole song, with lyric lanes for the **current** (gold) and **new** (green) lyrics. Each bar spans the time its line is shown. Word timings appear as divisions inside a bar, and the playing line lights up.
+- **Overview waveform** of the whole song, with the four timelines under it (see *Timelines* below). Each bar spans the time its line is shown. Word timings appear as divisions inside a bar, and the playing line lights up.
 - **Scrolling waveform** that moves past a fixed red playhead (8 s view), with line text, progress through the line, and the current word.
 - Seeks and scrubbing glide with a 0.2 s ease.
 - **Time rulers** under both waveforms show where you are.
 - **Hovering** over a waveform shows the current and new lyric at that point.
 - **Click a waveform to jump there; drag it to scrub.**
+- **Above the needle** in the scrolling waveform: **⌖** moves the next lyric (the first one after the needle) to the needle; **⧉** copies the needle's time, to paste into a lyric's timestamp (click the timestamp, Ctrl+V).
 - **Checkpoints:**
-  - **Ctrl+click** the overview to add one; **Ctrl+click** on an existing one removes it. Right-click a checkpoint or its ▶ button also deletes it.
-  - Keys **1–9** play checkpoint N; **0** plays the next one.
+  - **Ctrl+click** the overview's waveform to add one; **Ctrl+click** on an existing one removes it. Right-click a checkpoint or its ▶ button also deletes it.
+  - Checkpoints are **numbered in the order you made them**, not by their place in the song, and keep their numbers when others are deleted.
+  - Keys **1–9** play checkpoint N. A number that isn't set yet **sets that checkpoint at the needle**. **0** plays the next one by number.
+  - **`** (or **~**) plays the next checkpoint in the song after the needle, then wraps round to the first.
   - Each plays ± the checkpoint length (default 1.0 s), then stops, or repeats if *Loop* is ticked.
   - Defaults are the first and last lyric line. Your own checkpoints are saved per song; *Reset points* restores the defaults.
 - **Volume slider** next to the play button, on a logarithmic (decibel) scale so most of its travel covers the quieter range. Click the **%** to type a level, or use the mouse wheel over the slider. **Space** plays and pauses. Number keys and Space work unless you are typing in an editable box.
 
 **Lyrics panes:** current lyrics on the left, a choice of new lyrics on the right: what Find found, sidecars, collection matches, LRCLIB (cached or *Search LRCLIB*), the current lyrics (to re-time them), the original lyrics, or *No lyrics*. The panes scroll together, keep the playing line centred, and animate smoothly. Click a line to jump to it.
 
-- Under each pane is a button: **Keep current** or **Use new**. The one Apply will use is **green with a ✓**.
+- **What to write**, under the Edited pane: **Keep current**, **Use found** (with its Match %), **⚡ Use aligned** (with the % of words the GPU heard) or **✎ Use edited**. The one Apply will use is **green with a ✓**. By default it's the most worked-on level: Edited once you change something there (it becomes the choice by itself, a moment after you stop), else Aligned if the song was aligned, else Found.
 - *Reset to default* removes your choice for the song.
+- **Right-click a line** in the Edited pane to **insert a line before / after** it or **delete** it. This changes only the Edited lyrics; Found keeps the lines as found.
 
-**The lyric panes:** the song's **Current** lyrics are collapsed by default; **▸ Current** shows them beside the new ones and **◂ Hide** collapses them again (remembered). While they're hidden, **Keep current** sits beside **Use new**.
+**The lyric panes:** the song's **Current** lyrics are collapsed by default; **▸ Current** shows them beside the Edited ones and **◂ Hide** collapses them again (remembered).
 
 **Timing of the new lyrics** (the controls under the waveforms):
 
@@ -125,26 +133,30 @@ Row colours show the action: local (gold), online (blue), custom (purple), don't
   - Lines before the first or after the last move by the same amount, squeezed so they stay within 0 and the song's length.
 
   Interpolate and Ripple are mutually exclusive: with Ripple on, the Interpolate button shows *✓ Ripple*.
-- **Auto-align (GPU):** locates the New lyrics in this song's vocals (needs the NVIDIA add-on; see below).
-  - The lines it was sure of get those times (purple) and the others interpolate or ripple. Times you set yourself are kept.
+- **Auto-align (GPU):** locates the lyrics in this song's vocals (needs the NVIDIA add-on; see below). The result becomes the **Aligned** timeline and is brought down into Edited:
+  - The lines it was sure of get those times and the others interpolate or ripple. Times you set yourself are kept.
   - If fewer lyric words were heard being sung than **Aligned lyrics must match**, it still does this but says *Partly aligned*, so check those lines.
   - Otherwise nothing changes, and a note says why.
-- **Clear pins** and **Clear edits** remove them; *Reset timing* clears everything.
+- **Clear pins** removes the pins.
+- **⇣ Found → Edited** starts Edited over from the found timing (clears offset, stretch, pins and edited times). **⇣ Aligned → Edited** brings the GPU's whole timing down into Edited, keeping the times you set yourself.
 
-**Lanes under the waveforms:** *Current*, *Found* (the lyrics as found) and *Edited*. The Edited lane appears whenever the timing has been changed, by you or by the aligner, and stays when you come back to the song.
-- Lines placed by the GPU aligner are purple, brighter where they were heard more surely. Times you set are yellow. Lines that only moved along (offset, stretch, interpolate, ripple) are slate blue.
-- Hover over a lyric to see its found and edited times and how it got its time: ⚡ placed by the GPU aligner (with its certainty), ✎ your time, or moved along.
+**Timelines under the waveforms** (named on the left), top to bottom:
+- **Current:** the song's lyrics now (gold).
+- **Found:** the lyrics as found (green).
+- **⚡ Aligned:** where the GPU placed them (purple, brighter where it heard them more surely). Shown once the song was aligned (while finding, from the Align menu, or with Auto-align).
+- **✎ Edited:** what *Use edited* writes (blue): everything you moved, stretched, typed or brought down. Lines taken from Aligned are indigo, times you set light blue, lines that only moved along mid blue. It is the only timeline you can change.
 
-**Resize a lyric** by dragging either edge in the scrolling waveform (the cursor changes on an edge):
-- **Start:** moves only that lyric.
-- **End, with empty time after it:** moves only the gap. Nothing after it moves until the gap is used up.
-- **End, with the next lyric right after it:** later pushes the following lyrics up to the next gap, which absorbs the change. Earlier opens a gap.
+**Selecting lyrics in a timeline:** click a bar to select it (and jump there), **Ctrl+click** to add or remove bars, or **drag along a timeline** to select every bar in that range. A selection is always in one timeline. Ctrl+click on a bar selects; Ctrl+click on the overview's waveform still adds a checkpoint.
 
-The lyric lanes and the New list follow every change live, whether it comes from you or from the aligner.
+**Bringing lyrics down:** drag selected bars from **Found** or **Aligned** down onto **Edited**: those lyrics take the times (and the aligner's gaps) of the timeline they came from.
 
-Songs aligned while finding open the same way: the found lyrics with the aligner's purple times on top of the original timing. **Clear edits** goes back to the original timing.
+**In Edited:** drag selected bars left or right to move them. **Stretch** a lyric by its handles in the scrolling waveform (the cursor changes on a handle):
+- Every lyric has a handle at its **start**: dragging it moves only that lyric's start.
+- A lyric has a handle at its **end** only when a gap (an empty line) or the end of the song follows it: dragging it moves the gap. Nothing after it moves until the gap is used up.
 
-Pins, edits and checkpoints are saved per song. A song aligned on the GPU after you last opened it shows that alignment (purple), and the times you set yourself are kept.
+The timelines and the Edited list follow every change live, whether it comes from you or from the aligner. Hover over a timeline to see each one's line there, the aligner's certainty, and how the Edited line got its time.
+
+Pins, edits, added or deleted lines, the Aligned timeline and checkpoints are saved per song. A song aligned on the GPU after you last opened it shows that alignment, and the times you set yourself are kept.
 
 **Apply confident** (bottom bar, beside Apply) writes the found lyrics at or above both the **High confidence** and **Good fit** levels straight away, without asking. Songs with your own choices or edits are left for **Apply**.
 
@@ -155,6 +167,7 @@ On Windows, sound is played through the default output device. Without an output
 ## Align low-confidence lyrics (NVIDIA GPU, optional)
 
 Off by default. Switch it on under **Scores and alignment** on the Find lyrics tab.
+- **⚡ Align every song, not only low-confidence ones** (off by default): sends every song with found lyrics to the GPU while finding. **⚡ Align (GPU) → Align all songs in the list** does the same for the songs listed now.
 - **⚡ Keep the GPU models loaded** (on by default): the aligner and its models stay in GPU memory (about 3 GB) between songs and runs, so aligning starts at once. Switched off, they're released after 2 minutes without work.
 - **Requirements:** an NVIDIA graphics card with its driver installed. Without one, the option can't be switched on.
 - **First use:** the app offers to install a one-time add-on into `%LOCALAPPDATA%\mass-synced-lyrics\aligner`. It needs Python 3.10–3.12 from python.org.
@@ -262,6 +275,8 @@ LRCLIB allows about 90 requests/minute for identified clients, and this tool use
 Songs are processed in parallel (6 workers by default; `--workers N`, or `"workers"` in `settings.json`). Saving uses the same number of workers. All lookup workers share the one LRCLIB rate limit, and a "slow down" reply from LRCLIB pauses all of them. AcoustID lookups run one at a time.
 
 The app switches to the **Review & player** tab as soon as the first song with new lyrics is found. You can play, edit and save songs there while the rest are still being looked up; the list keeps growing as results come in.
+
+GPU alignment runs alongside Find, one song at a time on the GPU (the GPU is the bottleneck: on an 8 GB card a second song at once would not fit or go faster). Everything around it overlaps: while the GPU works on a song, the worker already reads the next song's audio, and the finished song is judged, scored against the audio and stored on another thread. Songs already aligned, or whose GPU result is cached, take no GPU time at all.
 
 ## Building
 

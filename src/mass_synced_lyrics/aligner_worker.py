@@ -69,6 +69,7 @@ class Worker:
         self._whisper = None
         self._demucs = None
         self._req = None                  # id of the request being worked on (for progress messages)
+        self._pre: dict = {}              # audio path -> (thread, [decoded mix or error]) read ahead
         self._sep_len = 0
         self._stage = None
         self._stage_t0 = 0.0
@@ -138,7 +139,7 @@ class Worker:
         if self.separate:
             model = self.demucs
             self.stage("decode")
-            mix = _decode(path, model.samplerate)
+            mix = self._decoded(path, model.samplerate)
             self.duration = mix.shape[-1] / model.samplerate
             self.stage("separate")
             self._sep_len = mix.shape[-1]
@@ -150,10 +151,38 @@ class Worker:
             mono, rate = voc.mean(0).cpu(), model.samplerate
         else:
             self.stage("decode")
-            mix = _decode(path, 44100)
+            mix = self._decoded(path, 44100)
             self.duration = mix.shape[-1] / 44100
             mono, rate = mix.mean(0), 44100
         return julius.resample_frac(mono, rate, SR_WHISPER).numpy().astype("float32")
+
+    def prefetch(self, path: str) -> None:
+        """Decode the next song while the GPU works on this one (decoding is CPU and disk/network work)."""
+        import threading
+        if path in self._pre:
+            return
+        for old in list(self._pre)[:-1]:                # keep at most two read ahead
+            self._pre.pop(old, None)
+        box: list = []
+        rate = 44100
+
+        def work():
+            try:
+                box.append(_decode(path, rate))
+            except Exception as e:                       # read it normally when its turn comes
+                box.append(e)
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        self._pre[path] = (t, box, rate)
+
+    def _decoded(self, path: str, rate: int):
+        got = self._pre.pop(path, None)
+        if got is not None:
+            t, box, r = got
+            t.join()
+            if box and r == rate and not isinstance(box[0], Exception):
+                return box[0]
+        return _decode(path, rate)
 
     def _free(self) -> None:
         import gc
@@ -311,6 +340,9 @@ def serve(argv: list[str]) -> None:
             continue
         if req.get("quit"):
             break
+        if "prefetch" in req:                           # the next song: read its audio in the background
+            worker.prefetch(str(req["prefetch"]))
+            continue
         try:
             res = worker.align(req)
         except Exception as e:

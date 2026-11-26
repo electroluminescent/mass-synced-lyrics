@@ -7,6 +7,7 @@ from conftest import FakeLrclib, make_track, record
 
 from mass_synced_lyrics import ai_align, lrc
 from mass_synced_lyrics.engine import Engine
+from mass_synced_lyrics.paths import state_key
 from mass_synced_lyrics.state import State
 from mass_synced_lyrics.tags import TagFile
 
@@ -635,3 +636,72 @@ def test_clear_cache_undoes_alignment_and_forgets_lookups(settings, monkeypatch,
     settings.ignore_cache = True
     Engine(settings, lambda e: None, lrclib=lib).run()
     assert len(lib.calls) > n
+
+
+def test_selected_song_goes_first_and_results_are_finished_while_the_gpu_moves_on(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "nvidia_gpu", lambda: "NVIDIA test GPU")
+    log = tmp_path / "prefetch.txt"
+    monkeypatch.setenv("FAKE_PREFETCH_LOG", str(log))
+    paths = []
+    for n in range(4):
+        p = make_track(os.path.join(settings.music_folder, f"s{n}.flac"), "flac", title=f"Tune {n}")
+        paths.append(p)
+    _find(settings, [record(title=f"Tune {n}", synced=LYR, duration=12) for n in range(4)])
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, lambda s: ai_align.Aligner(command=fake_cmd()))
+    with svc._cv:                                   # queue them without starting, then pick one to go first
+        svc.paused = True
+    svc.submit(paths, force=True)
+    svc.prioritize([paths[3]])
+    assert [it[1] for it in svc._q][0] == state_key(paths[3])
+    svc.resume()
+    assert _wait(lambda: sum(1 for e in events if e.get("type") == "align_progress") == 4 and svc.idle(), 30)
+    done = [e["path"] for e in events if e.get("type") == "align_progress"]
+    assert done[0] == state_key(paths[3]) and all(e["status"] == "aligned" for e in events
+                                                 if e.get("type") == "align_progress")
+    assert log.exists() and log.read_text().strip()             # the next song's audio was read ahead
+    svc.stop()
+    svc.join(5)
+
+
+def test_priority_pick():
+    from collections import deque
+
+    from mass_synced_lyrics import priority
+    q = deque(["a.flac", "b.flac", "c.flac"])
+    priority.want_first(["c.flac"])
+    first = priority.pick("save", q)
+    assert first == "c.flac" and list(q) == ["a.flac", "b.flac"]
+    assert priority.pick("save", q) == "a.flac"                 # then in order again
+    priority.clear()
+
+
+def test_find_does_the_selected_song_first(settings):
+    from mass_synced_lyrics import priority
+    paths = [make_track(os.path.join(settings.music_folder, f"t{n}.flac"), "flac", title=f"Tune {n}")
+             for n in range(5)]
+    settings.workers = 1
+    settings.dry_run = True
+    order = []
+    eng = Engine(settings, lambda e: order.append(e["result"].path) if e["type"] == "result" else None,
+                 lrclib=FakeLrclib([]))
+    priority.want_first([paths[4]])
+    eng.run()
+    priority.clear()
+    assert state_key(order[0]) == state_key(paths[4])
+
+
+def test_mismatch_between_found_and_aligned():
+    assert ai_align.mismatch(LYR, LYR) == 0.0
+    shifted = "[00:05.00]Other first\n[00:10.00]Other second\n[00:12.00]Third line here"
+    assert ai_align.mismatch(LYR, shifted) >= ai_align.MISMATCH_FLAG
+
+
+def test_lrc_line_insert_and_delete():
+    t = "[ar:x]\n[00:01.00]a\n[00:05.00]b\n"
+    assert lrc.delete_line(t, 5.0, "b") == "[ar:x]\n[00:01.00]a\n"
+    out = lrc.insert_line(t, 1.0, "a", 3.0, "new", after=True)
+    assert [b for _, b in lrc.display_lines(out)] == ["a", "new", "b"] and out.startswith("[ar:x]")
+    out = lrc.insert_line(t, 1.0, "a", 0.5, "first", after=False)
+    assert [b for _, b in lrc.display_lines(out)][0] == "first"

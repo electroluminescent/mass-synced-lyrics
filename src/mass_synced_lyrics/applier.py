@@ -61,7 +61,16 @@ def _parallel(settings: Settings, items: list[str], job: Callable[[str, State], 
                 states.append(st)
         return job(item, st)
 
-    it = iter(items)
+    from collections import deque
+
+    from . import priority
+    waiting = deque(items)
+
+    def take():
+        while waiting:
+            yield priority.pick("save", waiting)     # the song you select is written next
+
+    it = take()
     try:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="msl-save") as pool:
             pending = {}

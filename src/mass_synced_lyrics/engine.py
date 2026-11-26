@@ -194,34 +194,41 @@ class Engine:
     # own job on a pool of threads, so slow network lookups overlap with local work. Results come
     # back to the calling thread, which records them, writes the CSV and emits events.
     def _run_pool(self, folders):
+        from collections import deque
+
+        from . import priority
         workers = max(1, int(getattr(self.s, "workers", 6) or 1))
         limit = workers * 3                      # bound outstanding work (and open files)
         folder_iter = iter(folders)
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="msl") as pool:
+        waiting: deque = deque()                 # prepared songs not handed to a thread yet: the song you
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="msl") as pool:   # select goes first
             pending: set = set()
 
             def fill():
                 while not self.cancel.is_set() and len(pending) < limit:
+                    if waiting:
+                        job = priority.pick("find", waiting, key=lambda j: j[0])
+                        pending.add(pool.submit(self._file_job, *job))
+                        continue
                     f = next(folder_iter, None)
                     if f is None:
                         return
                     pending.add(pool.submit(self._prep_folder, *f))
             fill()
-            while pending:
-                finished, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            while pending or (waiting and not self.cancel.is_set()):
+                finished, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED) if pending else (set(), None)
                 for fut in finished:
                     pending.discard(fut)
                     if fut.cancelled():
                         continue
                     kind, payload = fut.result()
                     if kind == "prep":
-                        for job in payload:
-                            if self.cancel.is_set():
-                                break
-                            pending.add(pool.submit(self._file_job, *job))
+                        if not self.cancel.is_set():
+                            waiting.extend(payload)
                     elif kind == "result":
                         yield payload
                 if self.cancel.is_set():
+                    waiting.clear()
                     for fut in list(pending):
                         if fut.cancel():
                             pending.discard(fut)

@@ -133,6 +133,7 @@ class App(tk.Tk):
         self.v_ai = tk.BooleanVar()
         self.v_ai_keep = tk.BooleanVar(value=True)
         self.v_ignore_cache = tk.BooleanVar(value=False)
+        self.v_ai_all = tk.BooleanVar(value=False)
         self._held_aligner = None
         self._held_lock = threading.Lock()
         self.v_ai_min = tk.IntVar()
@@ -183,6 +184,10 @@ class App(tk.Tk):
                  "placed, the rest interpolated, and the result is kept only if it reaches Aligned lyrics must "
                  "match. Needs an NVIDIA graphics card and a one-time add-on download of about 3 GB. Off by "
                  "default.", self._ai_toggled),
+                (GPU + " Align every song, not only low-confidence ones", self.v_ai_all,
+                 "With Align low-confidence lyrics on: send every song with found lyrics to the GPU, not only "
+                 "those below High confidence or Good fit. Songs already aligned are skipped. Off by default.",
+                 self._ai_all_toggled),
                 (GPU + " Keep the GPU models loaded", self.v_ai_keep,
                  "Keep the aligner and its speech and vocal models in GPU memory (about 3 GB) between songs and "
                  "runs, so aligning and Auto-align start at once instead of spending about 9 s starting up. "
@@ -366,6 +371,7 @@ class App(tk.Tk):
         self.v_ai.set(bool(s.ai_align))
         self.v_ai_keep.set(bool(getattr(s, "ai_keep_loaded", True)))
         self.v_ignore_cache.set(bool(getattr(s, "ignore_cache", False)))
+        self.v_ai_all.set(bool(getattr(s, "ai_align_all", False)))
         self.v_ai_min.set(snap5(s.ai_align_min, 50, 100))
         self.v_fit_audio.set(bool(s.fit_audio))
         self.v_only_found.set(bool(s.only_found))
@@ -396,6 +402,7 @@ class App(tk.Tk):
         s.ai_align = bool(self.v_ai.get())
         s.ai_keep_loaded = bool(self.v_ai_keep.get())
         s.ignore_cache = bool(self.v_ignore_cache.get())
+        s.ai_align_all = bool(self.v_ai_all.get())
         s.ai_align_min = self._ai_min_value()
         s.only_found = bool(self.v_only_found.get())
         s.output_mode = self.v_output.get()
@@ -730,6 +737,13 @@ class App(tk.Tk):
         if al is not None:
             al.close()
 
+    def _ai_all_toggled(self) -> None:
+        self.settings.ai_align_all = bool(self.v_ai_all.get())
+        try:
+            save_settings(self._collect_settings())
+        except OSError:
+            pass
+
     def _keep_loaded_toggled(self) -> None:
         self.settings.ai_keep_loaded = bool(self.v_ai_keep.get())
         try:
@@ -744,6 +758,14 @@ class App(tk.Tk):
             self._log("Align: GPU models are released after 2 minutes without work.")
         else:
             self._log("Align: GPU models stay loaded between songs and runs.")
+
+    def prioritize(self, paths) -> None:
+        """The song you selected goes next in every running operation (Find, Align, Save)."""
+        from . import priority
+        priority.want_first(paths)
+        svc = self._align_service(create=False)
+        if svc is not None:
+            svc.prioritize(paths)
 
     def queue_alignment(self, paths, force: bool = False) -> int:
         """Queue songs for the GPU aligner (runs alongside Find). force=True: whatever their scores."""
@@ -779,7 +801,15 @@ class App(tk.Tk):
                 kind = e.get("kind") or "online"
                 kw = {f"conf_{kind}": e.get("confidence"), f"fit_{kind}": e.get("fit")}
                 if e["path"] in self.review.rows:
+                    row = self.review.rows[e["path"]]
+                    row["check"] = bool(e.get("partial") or e.get("check"))
+                    if not row.get("level") or row.get("level") == "found":
+                        row["level"] = "aligned"
                     self.review.add_row(e["path"], "aligned", **kw)
+                if e.get("check"):
+                    self._log(f"Check: {name} — the aligned timing is {e.get('shift', 0):.1f} s from the found "
+                              "timing (typical line): the found lyrics may be for another version, or the GPU "
+                              "misheard. Compare Found and Aligned in the player.")
                 if e.get("partial"):
                     self._log(f"Partly aligned ({e['verify']:.0f}% of words heard, below "
                               f"{self.settings.ai_align_min}%): {name} — {e['reason']}. Only the lines it was sure "
@@ -1146,6 +1176,8 @@ class App(tk.Tk):
     def _on_key(self, e):
         if str(self.nb.select()) != str(self.review):   # select() may return a Tcl object
             return None
+        if int(getattr(e, "state", 0) or 0) & 0x4:       # Ctrl+… shortcuts aren't player keys
+            return None
         try:
             focus = self.focus_get()
         except (KeyError, tk.TclError):
@@ -1273,6 +1305,10 @@ class App(tk.Tk):
                           stop=self._align_stop)
 
     def destroy(self) -> None:
+        try:
+            self.review.shutdown()
+        except Exception:
+            pass
         job = getattr(self, "_align_tick_job", None)
         if job is not None:
             try:
@@ -1394,6 +1430,9 @@ class App(tk.Tk):
                     r = self.review.rows[p]
                     if r.get("status") == "aligned":
                         r["status"] = "proposed"
+                    r["check"] = False
+                    if r.get("level") == "aligned":
+                        r["level"] = ""
                     self.review.add_row(p, ops={"align": ""})
         finally:
             st.close()
@@ -1408,6 +1447,14 @@ class App(tk.Tk):
         from . import ai_align
 
         if not self._ensure_ai():
+            return
+        if which == "all":
+            songs = self._session_paths()
+            if not songs:
+                messagebox.showinfo(APP_TITLE, "There are no songs in the Review & player list.")
+                return
+            n = self.queue_alignment(songs, force=True)
+            self._log(f"Align: {n} song(s) queued for the GPU (songs already aligned are skipped quickly).")
             return
         if which in ("selected", "songs"):
             songs = list(songs) if which == "songs" and songs else self.review.selected_songs()
@@ -1530,7 +1577,9 @@ class App(tk.Tk):
                 self._first_reviewable(r.path)
             if r.status == "proposed" and self.settings.ai_align:
                 from .ai_align import is_low_confidence
-                if is_low_confidence(self.settings, r.score, r.fit):
+                if getattr(self.settings, "ai_align_all", False):
+                    self.queue_alignment([r.path], force=True)   # every song, while Find carries on
+                elif is_low_confidence(self.settings, r.score, r.fit):
                     self.queue_alignment([r.path])            # aligned on the GPU while Find carries on
             if time.monotonic() - getattr(self, "_apply_bar_refreshed", 0.0) > max(
                     1.5, 10 * getattr(self, "_apply_bar_cost", 0.0)):
@@ -1573,7 +1622,10 @@ class App(tk.Tk):
                 self.review.tree.selection_set(first)
                 self.review.tree.see(first)
             if self.settings.ai_align and not e["cancelled"]:
-                self.align_paths(None, everything=False)      # also low-confidence songs from earlier runs
+                if getattr(self.settings, "ai_align_all", False):
+                    self.align_paths(self._session_paths(), everything=True)
+                else:
+                    self.align_paths(None, everything=False)  # also low-confidence songs from earlier runs
                 svc = self._align_service(create=False)
                 if svc is not None and not svc.idle():
                     self.btn_stop.config(state="normal")

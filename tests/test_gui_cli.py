@@ -153,7 +153,8 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     rv._ov_ctrl_click(Ev(w * 0.3))
     app.update()
     assert len(rv.checkpoints) == 3 and len(rv._cp_buttons) == 3
-    rv._cp_buttons[1].event_generate("<Button-3>", x=3, y=3)
+    assert rv.checkpoints[2] == pytest.approx(3.0, abs=0.1)     # numbered by creation: #3, though 2nd in time
+    rv._cp_buttons[2].event_generate("<Button-3>", x=3, y=3)
     app.update()
     assert rv.checkpoints == [1.0, 8.2] and len(rv._cp_buttons) == 2
     rv._ov_right_click(Ev(w * 0.82 + 8))     # right-click near a checkpoint removes it
@@ -197,10 +198,11 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     # hover tooltip text
     class HE:
         widget = rv.ov
-        x = int(w * 0.55)
+        x, y = int(w * 0.55), 60                    # over the Found timeline
         x_root, y_root = 100, 100
     rv._hover(HE())
     assert rv.tooltip.label is not None and "Found: Second line" in rv.tooltip.label.cget("text")
+    assert "drag selected lyrics down onto Edited" in rv.tooltip.label.cget("text")
     rv.tooltip.hide()
 
     # choose -> recorded only; the bottom bar writes it
@@ -262,8 +264,9 @@ def test_review_table_groups_choices_pins_and_scrub(settings, tmp_path, monkeypa
     assert (ra["local"], ra["online"], ra["choice"]) == ("sidecar", "found", "local")
     assert (rb["local"], rb["online"], rb["choice"]) == ("", "found", "online")
     assert (rc["online"], rc["choice"]) == ("not found", "keep")
-    assert rv.tree.item(ka, "tags") == ("c_local",) and rv.tree.item(kb, "tags") == ("c_online",)
-    assert rv.tree.item(kc, "tags") == ("c_keep",)
+    tags = lambda k: tuple(x for x in rv.tree.item(k, "tags") if x != "viewing")   # noqa: E731
+    assert tags(ka) == ("c_found",) and tags(kb) == ("c_found",)
+    assert tags(kc) == ("c_keep",)
     album_a = rv.tree.parent(ka)
     artist = rv.tree.parent(album_a)
     assert album_a.startswith("grp:") and rv.tree.item(album_a, "text") == "Some Album"
@@ -271,8 +274,8 @@ def test_review_table_groups_choices_pins_and_scrub(settings, tmp_path, monkeypa
     assert rv.tree.parent(kc) != album_a
 
     # Choice cell cycles local -> online -> keep -> local and colours follow
-    assert rv.cycle_choice(ka) == "online" and rv.tree.item(ka, "tags") == ("c_online",)
-    assert rv.cycle_choice(ka) == "keep" and rv.tree.item(ka, "tags") == ("c_keep",)
+    assert rv.cycle_choice(ka) == "online" and tags(ka) == ("c_found",)
+    assert rv.cycle_choice(ka) == "keep" and tags(ka) == ("c_keep",)
     assert rv.cycle_choice(ka) == "local"
     # group row: everything in the album at once
     assert rv.cycle_group_choice(album_a) == "local"          # mixed group starts at Local
@@ -299,7 +302,8 @@ def test_review_table_groups_choices_pins_and_scrub(settings, tmp_path, monkeypa
     rv.cand = next(cd for cd in rv.cands if cd.text and lrc.same_lyrics(cd.text, LRC))
     rv._select_candidate(rv.cands.index(rv.cand))
     app.update()
-    assert rv.btn_apply.cget("text").startswith("✓") and not rv.btn_keep.cget("text").startswith("✓")
+    assert rv.btn_c_found.cget("text").startswith("✓") and not rv.btn_keep.cget("text").startswith("✓")
+    assert str(rv.btn_c_aligned.cget("state")) == "disabled"                # nothing aligned
     rv._lock()
     assert pump(lambda: rv.btn_keep.cget("text").startswith("✓"))
     assert rv.rows[ka]["choice"] == "keep"
@@ -332,6 +336,11 @@ def test_review_table_groups_choices_pins_and_scrub(settings, tmp_path, monkeypa
     rng = w.tag_nextrange("ts", "2.0", "2.end")
     w.see(rng[0])
     app.update()
+    if w.bbox(rng[0]) is None:                     # a small screen / high DPI: make room for the lyrics
+        app.geometry("1600x1300")
+        app.update()
+        w.see(rng[0])
+        app.update()
     x, y, _, h = w.bbox(rng[0])
     w.event_generate("<Button-1>", x=x + 3, y=y + h // 2)
     for _ in range(5):
@@ -962,7 +971,8 @@ def test_song_aligned_while_finding_opens_with_its_edits_visible(settings, tmp_p
     assert getattr(rv.cand, "ai_detail", None) is not None
     assert lrc.same_lyrics(rv.new_text, pending)                      # exactly what Apply will write
     assert rv.ai_keys and rv.txt_new.tag_ranges("ai_edited") and rv.edited_segs()
-    assert rv.btn_apply.cget("text").startswith("✓")                  # still the default, no choice made
+    assert rv.btn_c_aligned.cget("text").startswith("✓") and "(default)" in rv.btn_c_aligned.cget("text")
+    assert rv.aligned_text and rv.lane_bars["aligned"] and rv.aligned_verify
     rv.clear_edits()                                                  # back to the original timing
     assert [t for t, _ in rv.new_lines] == [0.5, 5.0, 7.0]
     rv.shutdown()
@@ -986,12 +996,12 @@ def test_activity_rows_install_block_log_times_and_current_pane(settings, tmp_pa
     settings.lrc_action = "keep"
     app = new_app(settings)
     rv = app.review
-    # the Current pane starts collapsed; Keep current sits beside Use new
+    # the Current pane starts collapsed; the four choices (Keep current … Use edited) are always there
     assert str(rv._lf) not in [str(x) for x in rv._lyrics_paned.panes()]
-    assert rv.btn_keep2.winfo_manager() == "pack"
+    assert rv.btn_c_keep.winfo_manager() == "pack" and rv.btn_c_edited.winfo_manager() == "pack"
     rv.set_current_shown(True)
     assert str(rv._lf) in [str(x) for x in rv._lyrics_paned.panes()] and app.settings.show_current
-    assert rv.btn_keep2.winfo_manager() == ""
+    assert rv.btn_c_keep.winfo_manager() == "pack"
     rv.set_current_shown(False)
     assert not app.settings.show_current
     # Find shows a row while it runs, gone when done
@@ -1301,13 +1311,188 @@ def test_batch_alignment_shows_on_a_song_opened_before_and_cache_can_be_cleared(
     tok = rv._token
     assert _pump(app, lambda: getattr(rv, "_loaded_token", 0) == tok and rv.audio is not None)
     app.update()
-    assert not rv.ai_keys and rv.tree.set(k, "align") == ""
+    assert not rv.ai_keys and GPU_MARK not in rv.tree.set(k, "align")   # (✎ if your edit became the choice)
     assert "Cleared cached data for 1 of 1" in app.txt.get("1.0", "end")
     assert not app.v_ignore_cache.get() and not app.settings.ignore_cache          # off by default
     rv.shutdown()
     app.destroy()
 
 
+GPU_MARK = "⚡"
+
+
 def gui_messagebox():
     from mass_synced_lyrics import gui
     return gui.messagebox
+
+
+def _open_player(settings, tmp_path, monkeypatch, lyr=None, n_songs=1):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    from conftest import FakeLrclib, record
+
+    from mass_synced_lyrics.engine import Engine
+
+    lyr = lyr or "[00:00.50]Other first\n[00:05.00]Other second\n[00:07.00]Third line here"
+    paths = [make_track(os.path.join(settings.music_folder, f"{chr(97 + i)}.flac"), "flac") for i in range(n_songs)]
+    settings.dry_run = True
+    Engine(settings, lambda e: None, lrclib=FakeLrclib([record(synced=lyr)])).run()
+    app = new_app(settings)
+    app.geometry("1300x900")
+    rv = app.review
+    app.nb.select(rv)
+    keys = [state_key(p) for p in paths]
+    for i, k in enumerate(keys):
+        rv.add_row(k, "proposed", "lrclib", "Some Artist", f"Some Song {i}", "", "found", "online")
+    rv.player.silent_reason = "test"
+    rv.tree.selection_set(keys[0])
+    assert _pump(app, lambda: rv.song is not None and rv.audio is not None)
+    app.update()
+    return app, rv, keys
+
+
+class _Ev:
+    def __init__(self, x, y, state=0, widget=None):
+        self.x, self.y, self.state, self.widget = x, y, state, widget
+        self.x_root = self.y_root = 100
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_timelines_select_drag_down_and_choose_a_level(settings, tmp_path, monkeypatch):
+    from mass_synced_lyrics.review_ui import OV_LANE_Y, SC_LANE_Y
+    app, rv, keys = _open_player(settings, tmp_path, monkeypatch)
+    # four levels; nothing aligned yet, so Found is the default
+    assert rv.btn_c_found.cget("text").startswith("✓") and "(default)" in rv.btn_c_found.cget("text")
+    assert str(rv.btn_c_aligned.cget("state")) == "disabled"
+    # an aligned timeline (as Auto-align would give)
+    rv._set_aligned({"text": "[00:01.20]Other first\n[00:04.00]\n[00:05.40]Other second\n[00:07.30]Third line here",
+                     "verify": 88.0, "pins": {"0.50": 1.2, "5.00": 5.4, "7.00": 7.3}, "ends": {"0.50": 4.0},
+                     "confs": {"0.50": 0.9, "5.00": 0.6, "7.00": 0.7}})
+    rv._recompute()
+    assert [b.key for b in rv.lane_bars["aligned"]] == ["0.50", "5.00", "7.00"]
+    assert "88%" in rv.btn_c_aligned.cget("text") and str(rv.btn_c_aligned.cget("state")) == "normal"
+    # select two aligned lyrics on the overview (click, Ctrl+click) and drag them down onto Edited
+    w = rv.ov.winfo_width()
+    x = lambda t: int(t / rv._duration() * w)                       # noqa: E731
+    ya, ye = OV_LANE_Y["aligned"] + 4, OV_LANE_Y["edit"] + 4
+    rv._ov_press(_Ev(x(2.0), ya))
+    rv._ov_release(_Ev(x(2.0), ya))
+    assert rv.sel_lane == "aligned" and rv.sel_keys == {"0.50"}
+    rv._ov_ctrl_click(_Ev(x(8.0), ya, state=4))
+    rv._ov_release(_Ev(x(8.0), ya))
+    assert rv.sel_keys == {"0.50", "7.00"}
+    rv._ov_press(_Ev(x(8.0), ya))
+    rv._ov_motion(_Ev(x(8.0), ya + 8))
+    rv._ov_release(_Ev(x(8.0), ye))
+    times = {b.key: round(b.start, 2) for b in rv.lane_bars["edit"]}
+    assert times["0.50"] == 1.2 and times["7.00"] == 7.3 and times["5.00"] != 5.4    # only those two
+    assert {"0.50", "7.00"} <= rv.ai_keys
+    # a range drawn along the Found timeline selects what it touches, only in that timeline
+    rv._ov_press(_Ev(x(4.0), OV_LANE_Y["new"] + 4))
+    rv._ov_motion(_Ev(x(9.0), OV_LANE_Y["new"] + 4))
+    rv._ov_release(_Ev(x(9.0), OV_LANE_Y["new"] + 4))
+    assert rv.sel_lane == "new" and rv.sel_keys == {"0.50", "5.00", "7.00"}
+    rv._ov_press(_Ev(x(6.0), OV_LANE_Y["new"] + 4))                 # a click selects just that one
+    rv._ov_release(_Ev(x(6.0), OV_LANE_Y["new"] + 4))
+    assert rv.sel_keys == {"5.00"}
+    # the edits make Edited the choice by themselves
+    rv._auto_use_edited()
+    assert _pump(app, lambda: rv.current_level()[0] == "edited")
+    assert _pump(app, lambda: rv.btn_c_edited.cget("text").startswith("✓"))
+    assert rv.rows[keys[0]]["level"] == "edited" and "c_edited" in rv.tree.item(keys[0], "tags")
+    # Use aligned / Use found write those timelines
+    rv._use_level("aligned")
+    assert _pump(app, lambda: rv.current_level()[0] == "aligned")
+    assert "c_aligned" in rv.tree.item(keys[0], "tags")
+    rv._use_level("found")
+    assert _pump(app, lambda: rv.current_level()[0] == "found")
+    # a level you pick right after an edit stands (the pending switch to Edited is dropped)
+    rv.set_line_time(1, 5.5)
+    rv._use_level("aligned")
+    import time as _t
+    end = _t.monotonic() + 1.5
+    while _t.monotonic() < end:
+        app.update()
+        _t.sleep(0.02)
+    assert rv.current_level()[0] == "aligned"
+    # Aligned → Edited (all) and Found → Edited (start over)
+    rv.transfer_all("aligned")
+    assert [round(b.start, 2) for b in rv.lane_bars["edit"]] == [1.2, 5.4, 7.3]
+    rv.transfer_all("new")
+    assert [round(b.start, 2) for b in rv.lane_bars["edit"]] == [0.5, 5.0, 7.0] and not rv.has_edits()
+    # stretching: only in Edited; a start handle on every lyric, an end handle only before a gap
+    sc = rv._ensure_scene()
+    rv._draw_scroll(0.0)
+    app.update()
+    ex = lambda t: int(sc["pad"] + t * sc["pps"] - rv.sc.canvasx(0))   # noqa: E731
+    assert rv._edge_at(ex(5.0), SC_LANE_Y["edit"] + 5) == (1, "start")
+    assert rv._edge_at(ex(5.0), SC_LANE_Y["new"] + 5) is None          # not in Found
+    assert rv._edge_at(ex(5.0) - 4, SC_LANE_Y["edit"] + 5) in ((1, "start"), None)
+    rv.set_line_time(0, 0.5)
+    rv.end_marks["0.50"] = 3.0                                          # a gap after the first lyric
+    rv._recompute()
+    sc = rv._ensure_scene()
+    rv._draw_scroll(0.0)
+    assert rv._edge_at(ex(3.0), SC_LANE_Y["edit"] + 5) == (0, "end")
+    rv.transfer_all("new")
+    # ⌖ puts the next lyric at the needle; ⧉ copies the needle's time
+    rv.player.seek(3.0)
+    rv.next_line_to_needle()
+    assert [round(t, 2) for t, b in rv.new_lines if b][1] == 3.0
+    rv.copy_needle_time()
+    assert app.clipboard_get() == "00:03.00"
+    # lines: insert and delete (Edited only; Found keeps them)
+    rv.insert_line(0, after=True, text="A new line")
+    assert [b for _, b in rv.new_lines if b] == ["Other first", "A new line", "Other second", "Third line here"]
+    assert len(rv.lane_bars["new"]) == 3
+    rv.delete_line(0)
+    assert [b for _, b in rv.new_lines if b][0] == "A new line"
+    rv._save_prefs()
+    assert "base" in rv.song.prefs
+    rv.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_checkpoint_keys_cycle_and_song_navigation(settings, tmp_path, monkeypatch):
+    app, rv, keys = _open_player(settings, tmp_path, monkeypatch, n_songs=3)
+    assert rv.checkpoints == [0.5, 7.0]
+    # an unset number key sets that checkpoint at the needle (numbered by when it was made)
+    rv.player.seek(3.0)
+    rv.key("5", None)
+    assert rv.checkpoints[4] == pytest.approx(3.0) and rv.checkpoints[2:4] == [None, None]
+    rv.key("3", None)                                    # #3 at the needle too
+    assert rv.checkpoints[2] == pytest.approx(3.0)
+    rv.delete_checkpoint(1)                              # numbers stay
+    assert rv.checkpoints[1] is None and rv.checkpoints[4] == pytest.approx(3.0)
+    # ` plays the next checkpoint in the song after the needle, round to the first
+    rv.player.pause()
+    rv.cp_range = None
+    rv.player.seek(1.0)
+    played = []
+    real = rv.play_checkpoint
+    rv.play_checkpoint = lambda i: (played.append(i), real(i))[1]
+    rv.key("grave", None)
+    assert rv.checkpoints[played[-1]] == pytest.approx(3.0)
+    rv.player.pause()
+    rv.cp_range = None
+    rv.player.seek(6.0)
+    rv.key("asciitilde", None)
+    assert rv.checkpoints[played[-1]] == pytest.approx(0.5)          # wrapped to the first
+    rv.play_checkpoint = real
+    rv.player.pause()
+    # Down / S: next song · Up / W: previous (not while typing)
+    rv.key("Down", None)
+    assert _pump(app, lambda: rv.song is not None and rv.song.path == keys[1])
+    assert rv.tree.item(keys[1], "text").startswith("▶ ") and not rv.tree.item(keys[0], "text").startswith("▶")
+    assert "viewing" in rv.tree.item(keys[1], "tags")
+    rv.key("s", None)
+    assert _pump(app, lambda: rv.song is not None and rv.song.path == keys[2])
+    rv.key("w", None)
+    assert _pump(app, lambda: rv.song is not None and rv.song.path == keys[1])
+    from tkinter import ttk
+    ent = ttk.Entry(rv)
+    assert rv.key("s", ent) is False                     # typing in a box: not a song key
+    rv.shutdown()
+    app.destroy()

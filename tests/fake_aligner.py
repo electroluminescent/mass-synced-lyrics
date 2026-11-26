@@ -13,6 +13,12 @@ for raw in sys.stdin:
     req = json.loads(raw)
     if req.get("quit"):
         break
+    if "prefetch" in req:                       # like the real worker: read ahead, no answer
+        log = os.environ.get("FAKE_PREFETCH_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write(req["prefetch"] + "\n")
+        continue
     crash = os.environ.get("FAKE_CRASH_ONCE")
     if crash and not os.path.exists(crash):
         open(crash, "w").close()

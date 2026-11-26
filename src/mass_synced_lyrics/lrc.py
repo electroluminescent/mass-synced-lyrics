@@ -177,6 +177,47 @@ def pin_key(t: float) -> str:
     return f"{t:.2f}"
 
 
+def _raw_line_at(text: str, t: float, body: str) -> int | None:
+    """Index (in text.splitlines()) of the timed line at `t` with this text."""
+    key = pin_key(t)
+    want = body.strip()
+    for i, line in enumerate(text.splitlines()):
+        m = LINE_TS_RE.match(line)
+        if not m:
+            continue
+        b = re.sub(r"<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>", "", line[m.end():]).strip()
+        if b == want and any(pin_key(_ts_to_seconds(x)) == key for x in TS_RE.finditer(m.group(0))):
+            return i
+    return None
+
+
+def delete_line(text: str, t: float, body: str) -> str:
+    """The lyrics without the line at `t` (only that timestamp, when a line has several)."""
+    lines = text.splitlines()
+    i = _raw_line_at(text, t, body)
+    if i is None:
+        return text
+    m = LINE_TS_RE.match(lines[i])
+    stamps = [x for x in TS_RE.finditer(m.group(0)) if pin_key(_ts_to_seconds(x)) != pin_key(t)]
+    if stamps:
+        lines[i] = "".join(x.group(0) for x in stamps) + lines[i][m.end():]
+    else:
+        del lines[i]
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def insert_line(text: str, t_ref: float, body_ref: str, new_t: float, new_body: str, after: bool) -> str:
+    """The lyrics with a new line at `new_t`, right before / after the line at `t_ref`."""
+    lines = text.splitlines()
+    i = _raw_line_at(text, t_ref, body_ref)
+    new = f"[{format_ts(new_t)}]{new_body}"
+    if i is None:
+        lines.append(new)
+    else:
+        lines.insert(i + 1 if after else i, new)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
 def warp(t: float, anchors: list[tuple[float, float]]) -> float:
     """Piecewise-linear map through (original, new) anchor points; the end segments are
     extended with their own slope, and a single anchor shifts everything by its offset."""
