@@ -64,7 +64,7 @@ As soon as **Find lyrics** finds the first song with new lyrics, the app switche
   Songs opened in the player are always checked against the audio. **Check lyrics against the audio (slower)** on the Find lyrics tab does it for every song while finding. The New pane shows each candidate's fit and what lowered it.
 
 **Progress columns:**
-- **Find**, **Align** and **Save** show ⟳ while a song is being worked on, then:
+- **Find**, **Align** and **Save** show ↻ while a song is being worked on, then:
   - ✓ done;
   - – nothing to do, or kept as found;
   - ✗ error.
@@ -98,14 +98,14 @@ Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hi
 - **Time rulers** under both waveforms show where you are.
 - **Hovering** over a waveform shows the current and new lyric at that point.
 - **Click a waveform to jump there; drag it to scrub.**
-- **Above the needle** in the scrolling waveform: **⌖** moves the next lyric (the first one after the needle) to the needle; **⧉** copies the needle's time, to paste into a lyric's timestamp (click the timestamp, Ctrl+V).
+- **Above the needle** in the scrolling waveform, two small buttons (hover for a hint): the **target** (a ring with cross hairs) moves the next lyric (the first one after the needle) to the needle; the **copy** button (two sheets) copies the needle's time, to paste into a lyric's timestamp (click the timestamp, Ctrl+V).
 - **Checkpoints:**
   - **Ctrl+click** the overview's waveform to add one; **Ctrl+click** on an existing one removes it. Right-click a checkpoint or its ▶ button also deletes it.
   - Checkpoints are **numbered in the order you made them**, not by their place in the song, and keep their numbers when others are deleted.
   - Keys **1–9** play checkpoint N. A number that isn't set yet **sets that checkpoint at the needle**. **0** plays the next one by number.
   - **`** (or **~**) plays the next checkpoint in the song after the needle, then wraps round to the first.
   - Each plays ± the checkpoint length (default 1.0 s), then stops, or repeats if *Loop* is ticked.
-  - Defaults are the first and last lyric line. Your own checkpoints are saved per song; *Reset points* restores the defaults.
+  - Defaults are the start of the first and of the last lyric. Your own checkpoints are saved per song; *Reset points* restores the defaults.
 - **Volume slider** next to the play button, on a logarithmic (decibel) scale so most of its travel covers the quieter range. Click the **%** to type a level, or use the mouse wheel over the slider. **Space** plays and pauses. Number keys and Space work unless you are typing in an editable box.
 
 **Lyrics panes:** current lyrics on the left, a choice of new lyrics on the right: what Find found, sidecars, collection matches, LRCLIB (cached or *Search LRCLIB*), the current lyrics (to re-time them), the original lyrics, or *No lyrics*. The panes scroll together, keep the playing line centred, and animate smoothly. Click a line to jump to it.
@@ -150,7 +150,7 @@ Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hi
 
 **Bringing lyrics down:** drag selected bars from **Found** or **Aligned** down onto **Edited**: those lyrics take the times (and the aligner's gaps) of the timeline they came from.
 
-**In Edited:** drag selected bars left or right to move them. **Stretch** a lyric by its handles in the scrolling waveform (the cursor changes on a handle):
+**In Edited:** drag selected bars left or right to move them: each moves whole (start and end), the lyrics attached after it (no gap in between) are stretched or squeezed up to the next gap or the end of the song, which stay put, and the lyric before ends where the moved one now starts. A gap right after a moved lyric moves with it. **Stretch** a lyric by its handles in the scrolling waveform (the cursor changes on a handle):
 - Every lyric has a handle at its **start**: dragging it moves only that lyric's start.
 - A lyric has a handle at its **end** only when a gap (an empty line) or the end of the song follows it: dragging it moves the gap. Nothing after it moves until the gap is used up.
 
@@ -190,7 +190,7 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 
 **Nothing changes** when less than 30 % of the words were heard (probably not these lyrics), or fewer than 2 lines could be placed with confidence. The activity log says why.
 
-**Progress:** the row at the top of the window shows the song number, the current step (starting the worker, loading the models, isolating the vocals, placing the lyric words, listening to what was sung, checking and saving, and so on), that step's % and the time left. Each step gets a share of the bar sized by its estimate, from the song's length and this PC's measured speed. On an RTX 3070 a 3.6-minute song takes about 26 s, plus about 9 s the first time to start the worker and load the models. The **Align** column shows the current song's progress (⟳ 42%).
+**Progress:** the row at the top of the window shows the song number, the current step (starting the worker, loading the models, isolating the vocals, placing the lyric words, listening to what was sung, checking and saving, and so on), that step's % and the time left. Each step gets a share of the bar sized by its estimate, from the song's length and this PC's measured speed. On an RTX 3070 a 3.6-minute song takes about 26 s, plus about 9 s the first time to start the worker and load the models. The **Align** column shows the current song's progress (↻ 42%).
 
 **Icons:** ⚡ marks everything done on the GPU: ⚡✓ re-timed, ⚡≈ partly aligned (check it), ⚡– kept as found, ⚡✗ error. ✎ marks songs whose timing you changed yourself in the player and saved. An empty Align cell means the song wasn't aligned.
 
@@ -276,7 +276,9 @@ Songs are processed in parallel (6 workers by default; `--workers N`, or `"worke
 
 The app switches to the **Review & player** tab as soon as the first song with new lyrics is found. You can play, edit and save songs there while the rest are still being looked up; the list keeps growing as results come in.
 
-GPU alignment runs alongside Find, one song at a time on the GPU (the GPU is the bottleneck: on an 8 GB card a second song at once would not fit or go faster). Everything around it overlaps: while the GPU works on a song, the worker already reads the next song's audio, and the finished song is judged, scored against the audio and stored on another thread. Songs already aligned, or whose GPU result is cached, take no GPU time at all.
+GPU alignment runs alongside Find, one song at a time on the GPU (the GPU is the bottleneck: on an 8 GB card a second song at once would not fit or go faster). Only the model in use is kept on the GPU (the vocal model while isolating the vocals, the speech model after), so it needs about 3–4 GB instead of 4.5–5 GB.
+
+**If aligning crawls** (minutes per song), the GPU has run out of memory and Windows is lending it system memory, which is many times slower. Other programs use GPU memory too: games, video and audio editors (Adobe Audition), browsers with many tabs, Discord. The log says so, with how much memory other programs use. Close them; or in NVIDIA Control Panel → Manage 3D settings → *CUDA - Sysmem Fallback Policy* choose *Prefer No Sysmem Fallback*, so aligning stops with a message instead of crawling. Everything around it overlaps: while the GPU works on a song, the worker already reads the next song's audio, and the finished song is judged, scored against the audio and stored on another thread. Songs already aligned, or whose GPU result is cached, take no GPU time at all.
 
 ## Building
 

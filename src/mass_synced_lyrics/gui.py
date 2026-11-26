@@ -1420,6 +1420,9 @@ class App(tk.Tk):
                                    "go back to their found timing).\n\nYour choices, edits and the backups of "
                                    "original lyrics are kept. No files are changed."):
             return
+        rv = self.review
+        if rv.song is not None and rv.song.path in songs:
+            rv.forget_gpu_timing()                    # the open song: drop it in the player too, then save
         st = State(self.settings.resolved_state_db())
         cleared = 0
         try:
@@ -1490,6 +1493,8 @@ class App(tk.Tk):
         elif t == "file_start":
             self.review.set_op(e["path"], "find", "busy",
                                None if state_key(e["path"]) in self.review.rows else "searching")
+        elif t == "align_slow":
+            self._log(e["message"])
         elif t == "align_song_start":
             self.review.set_op(e["path"], "align", "busy")
             self._align_tick()

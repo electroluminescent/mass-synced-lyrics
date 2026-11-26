@@ -385,20 +385,46 @@ def stage_costs() -> dict:
             try:
                 with open(_timings_path(), encoding="utf-8") as f:
                     for k, v in json.load(f).items():
-                        if k in DEFAULT_COST and isinstance(v, list) and len(v) == 2:
+                        if k in DEFAULT_COST and isinstance(v, list) and len(v) == 2 and \
+                                not _outlier(k, float(v[0]), float(v[1])):
                             _cost_cache[k] = (float(v[0]), float(v[1]))
             except (OSError, ValueError, TypeError):
                 pass
         return dict(_cost_cache)
 
 
+SLOW_FACTOR = 8.0     # a step this many times slower than on the RTX 3070 is not normal speed (see slow_steps)
+
+
+def _outlier(k: str, fixed: float, per: float) -> bool:
+    d_fixed, d_per = DEFAULT_COST[k]
+    return fixed > d_fixed * SLOW_FACTOR + 10 or per > d_per * SLOW_FACTOR + 1
+
+
+def slow_steps(times: dict, duration: float | None) -> list[tuple[str, float, float]]:
+    """Steps that took far longer than normal: [(step, seconds taken, seconds normal)]."""
+    minutes = max(0.25, (duration or 240.0) / 60.0)
+    out = []
+    for k in ("separate", "language", "align", "transcribe"):
+        t = times.get(k)
+        if t is None or k not in DEFAULT_COST:
+            continue
+        fixed, per = DEFAULT_COST[k]
+        normal = fixed + per * minutes
+        if t > normal * SLOW_FACTOR + 10:
+            out.append((k, t, normal))
+    return out
+
+
 def learn_timings(times: dict, duration: float | None) -> None:
-    """Fold one song's measured step times into the estimates (moving average, kept on disk)."""
+    """Fold one song's measured step times into the estimates (moving average, kept on disk). Steps that
+    were wildly slow (the GPU short of memory) aren't learned: they'd make every estimate wrong."""
     global _cost_cache
     costs = stage_costs()
     minutes = max(0.25, (duration or 0) / 60.0)
+    slow = {k for k, _, _ in slow_steps(times, duration)}
     for k, t in times.items():
-        if k not in costs or t is None or t < 0 or t > 1800:
+        if k not in costs or t is None or t < 0 or t > 1800 or k in slow:
             continue
         fixed, per = costs[k]
         if k in PER_MINUTE:
@@ -1201,7 +1227,7 @@ class AlignService:
                             self._pause(msg, path)
                             continue
                         prog.step("check")
-                        self._done_progress(prog)
+                        self._done_progress(prog, learn=not result.get("cached"), result=result)
                         self._emit({"type": "align_raw", "token": token, "path": path, "result": result})
                         continue
                     _, path, force = item
@@ -1251,6 +1277,27 @@ class AlignService:
             self.busy = False
 
     # -- finishing (judge + store) on its own thread
+    def _check_speed(self, times: dict, duration, vram: dict) -> None:
+        """Tell once per run when the GPU is crawling, and why that usually is."""
+        slow = slow_steps(times, duration)
+        if not slow or getattr(self, "_slow_told", False):
+            return
+        self._slow_told = True
+        k, t, normal = slow[0]
+        msg = (f"Aligning is running very slowly: {STAGE_LABEL.get(k, k).lower()} took {t:.0f} s where about "
+               f"{normal:.0f} s is normal.")
+        total, free = vram.get("total_gb"), vram.get("free_gb")
+        if total:
+            used_by_others = max(0.0, total - (free or 0) - (vram.get("mine_gb") or 0))
+            msg += (f" Other programs are using about {used_by_others:.1f} GB of the GPU's {total:.0f} GB of "
+                    f"memory, leaving {free or 0:.1f} GB.")
+        msg += (" When the GPU runs short of memory, Windows lends it system memory, which is many times slower. "
+                "Close programs that use the GPU (games, video or audio editors such as Adobe Audition, browsers "
+                "with many tabs, Discord), then Stop and start aligning again. In NVIDIA Control Panel → Manage "
+                "3D settings → CUDA - Sysmem Fallback Policy → Prefer No Sysmem Fallback, it stops with a "
+                "message instead of crawling.")
+        self._emit({"type": "align_slow", "message": msg})
+
     def _finish_later(self, s, path, ctx, result, prog) -> None:
         with self._fin_cv:
             self._fin_q.append((s, path, ctx, result, prog))
@@ -1274,7 +1321,8 @@ class AlignService:
                     if st is None:
                         st = State(s.resolved_state_db())
                     ev = finish_one(s, path, st, float(getattr(s, "ai_align_min", 70)), ctx, result)
-                    self._done_progress(prog, learn=ev["status"] in ("aligned", "rejected"))
+                    self._done_progress(prog, learn=ev["status"] in ("aligned", "rejected") and
+                                        not result.get("cached"), result=result)
                     self._finished(ev, path)
                 except Exception as e:
                     self._done_progress(prog, learn=False)
@@ -1328,10 +1376,11 @@ class AlignService:
         self.current = SongProgress(path, duration, warm=running and al.loaded, running=running, kind=kind)
         return self.current
 
-    def _done_progress(self, prog: SongProgress, learn: bool = True) -> None:
+    def _done_progress(self, prog: SongProgress, learn: bool = True, result: dict | None = None) -> None:
         times = prog.finish()
         if learn:
             learn_timings(times, prog.duration)
+            self._check_speed(times, prog.duration, (result or {}).get("vram") or {})
         if self.current is prog:
             self.current = None
             self.current_token = None

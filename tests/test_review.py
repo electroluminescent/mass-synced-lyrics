@@ -411,3 +411,35 @@ def test_old_alignments_become_visible_edits():
     aligned = "[00:01.50]a\n[00:04.00]\n[00:05.00]b\n[00:10.00]c\n"
     d = _diff_as_edits(orig, aligned)
     assert d["pins"] == {"1.00": 1.5, "9.00": 10.0} and d["ends"] == {"1.00": 4.0}
+
+
+def test_moving_a_lyric_stretches_the_attached_ones_up_to_the_gap():
+    from mass_synced_lyrics.review_ui import move_lyrics
+    # rows: a 10, b 14, c 17 (attached), gap 20, d 24
+    times = [10.0, 14.0, 17.0, 20.0, 24.0]
+    texts = ["a", "b", "c", "", "d"]
+    # move b 1 s later: its start and end move; c is squeezed between b's new end and the gap (which stays)
+    out = move_lyrics(times, texts, [1], 1.0, 60)
+    assert out[1] == 15.0 and out[2] == 18.0 and 3 not in out and 4 not in out
+    # 1 s earlier: c is stretched; a ends earlier by itself (it ends where b starts)
+    out = move_lyrics(times, texts, [1], -1.0, 60)
+    assert out == {1: 13.0, 2: 16.0}
+    # c with the gap right after it: the gap moves along, d stays
+    out = move_lyrics(times, texts, [2], 2.0, 60)
+    assert out == {2: 19.0, 3: 22.0}
+    # it can't run into the lyric before, nor squeeze the attached ones to nothing
+    out = move_lyrics(times, texts, [1], -10.0, 60)
+    assert out[1] == 10.05
+    out = move_lyrics(times, texts, [1], 10.0, 60)
+    assert out[2] < 20.0 and out[1] < out[2]
+    # no gap: everything after is squeezed towards the song's end
+    out = move_lyrics([1.0, 2.0, 3.0], ["a", "b", "c"], [0], 1.0, 10.0)
+    assert out[0] == 2.0 and out[1] == 3.0 and 3.0 < out[2] < 10.0
+    # nothing selected / no move
+    assert move_lyrics(times, texts, [], 1.0, 60) == {} and move_lyrics(times, texts, [3], 1.0, 60) == {}
+
+
+def test_default_checkpoints_are_the_first_and_last_lyric():
+    from mass_synced_lyrics.review import default_checkpoints
+    text = "[00:01.00]first\n[00:05.00]last\n[00:09.00]\n"          # a gap after the last lyric
+    assert default_checkpoints(text, 60) == [1.0, 5.0]

@@ -207,7 +207,9 @@ def save_prefs(path: str, prefs: dict, settings: Settings) -> None:
 
 
 def default_checkpoints(text: str | None, duration: float) -> list[float]:
-    lines = [t for t, _ in lrcmod.display_lines(text) if t is not None and t <= duration + 1]
+    """The start of the first and of the last lyric (empty lines, e.g. a gap after the last lyric, don't
+    count)."""
+    lines = [t for t, b in lrcmod.display_lines(text) if t is not None and b.strip() and t <= duration + 1]
     if not lines:
         return []
     first, last = lines[0], lines[-1]

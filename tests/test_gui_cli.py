@@ -138,7 +138,8 @@ def test_review_tab_player_checkpoints_timing_apply(settings, tmp_path, monkeypa
     app.update()
     rv.tree.event_generate("<KeyPress-1>")
     app.update()
-    assert rv.player.playing and rv.cp_range == (pytest.approx(0.7), pytest.approx(1.3))
+    assert rv.cp_range == (pytest.approx(0.7), pytest.approx(1.3))
+    assert rv.player.playing or rv.player.position() >= 1.2          # (a slow PC may have played it already)
     assert pump(lambda: not rv.player.playing, 200)
     assert 1.25 <= rv.player.position() <= 1.45
 
@@ -1070,7 +1071,7 @@ def test_list_progress_columns_hide_columns_new_find_clears_and_remove(settings,
     # Find: in progress, then done
     app._handle({"type": "file_start", "path": a})
     app.update()
-    assert rv.tree.exists(a) and rv.tree.set(a, "find") == "⟳" and "busy" in rv.tree.item(a, "tags")
+    assert rv.tree.exists(a) and rv.tree.set(a, "find") == "↻" and "busy" in rv.tree.item(a, "tags")
     assert rv.tree.set(a, "status") == "Looking up…"                       # shown though nothing found yet
     r = Result(a, "proposed", "lrclib", Meta(title="One", artist="Band", album="Album"), 10.0,
                online="found", choice="online", conf_online=97.0, fit_online=90.0)
@@ -1084,12 +1085,12 @@ def test_list_progress_columns_hide_columns_new_find_clears_and_remove(settings,
     # Save: in progress → done; Align marks
     app._handle({"type": "apply_file_start", "path": a})
     app.update()
-    assert rv.tree.set(a, "save") == "⟳"
+    assert rv.tree.set(a, "save") == "↻"
     app._handle({"type": "apply_progress", "path": a, "done": 1, "total": 1, "status": "embedded",
                  "source": "lrclib", "detail": "", "counts": {}})
     assert rv.tree.set(a, "save") == "✓"
     app._handle({"type": "align_song_start", "path": a})
-    assert rv.tree.set(a, "align") == "⟳"
+    assert rv.tree.set(a, "align") == "↻"
     app._handle({"type": "align_song_start", "path": state_key(os.path.join(d, "x.flac"))})
     assert state_key(os.path.join(d, "x.flac")) not in rv.rows            # only Find adds songs
     # the end of a run clears anything still marked in progress
@@ -1257,7 +1258,7 @@ def test_auto_align_button_belongs_to_its_song_and_shows_progress(settings, tmp_
     # the Align column: GPU marks, progress while busy, and your own timing
     rv.set_op(k, "align", "busy")
     rv.set_align_pct(k, 37)
-    assert rv.tree.set(k, "align") == "⟳ 37%"
+    assert rv.tree.set(k, "align") == "↻ 37%"
     rv.set_op(k, "align", "done")
     assert rv.tree.set(k, "align") == "⚡✓"
     assert ai_align.STAGE_LABEL["separate"] == "Isolating the vocals"
@@ -1494,5 +1495,40 @@ def test_checkpoint_keys_cycle_and_song_navigation(settings, tmp_path, monkeypat
     from tkinter import ttk
     ent = ttk.Entry(rv)
     assert rv.key("s", ent) is False                     # typing in a box: not a song key
+    rv.shutdown()
+    app.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY") and os.name != "nt", reason="needs a display")
+def test_dragging_a_bar_in_edited_moves_it_and_the_needle_buttons(settings, tmp_path, monkeypatch):
+    from mass_synced_lyrics.review_ui import OV_LANE_Y
+    app, rv, keys = _open_player(settings, tmp_path, monkeypatch)
+    w = rv.ov.winfo_width()
+    x = lambda t: int(t / rv._duration() * w)                       # noqa: E731
+    y = OV_LANE_Y["edit"] + 4
+    rv._ov_press(_Ev(x(6.0), y))                                     # select "Other second" (5.0–7.0)
+    rv._ov_release(_Ev(x(6.0), y))
+    assert rv.sel_lane == "edit" and rv.sel_keys == {"5.00"}
+    rv._ov_press(_Ev(x(6.0), y))                                     # and drag it 1 s later
+    rv._ov_motion(_Ev(x(6.5), y))
+    rv._ov_release(_Ev(x(7.0), y))
+    starts = [round(b.start, 1) for b in rv.lane_bars["edit"]]
+    assert starts[0] == 0.5 and abs(starts[1] - 6.0) < 0.15          # moved, start and end
+    assert 7.0 < starts[2] < 10.0                                    # the attached one after it squeezed
+    # the needle's buttons are drawn shapes you can click
+    rv.transfer_all("new")
+    rv.player.seek(3.0)
+    rv._ensure_scene()
+    rv._draw_scroll(3.0)
+    app.update()
+    item = rv.sc.find_withtag("tool_copy")[0]
+    x0, y0, x1, y1 = rv.sc.coords(item)
+    ev = _Ev(int(x0 - rv.sc.canvasx(0) + 3), int(y0 + 3))
+    assert rv._sc_tool(ev) and app.clipboard_get() == "00:03.00"
+    item = rv.sc.find_withtag("tool_target")[0]
+    x0, y0, x1, y1 = rv.sc.coords(item)
+    assert rv._sc_tool(_Ev(int(x0 - rv.sc.canvasx(0) + 3), int(y0 + 3)))
+    assert [round(t, 2) for t, b in rv.new_lines if b][1] == 3.0
+    assert not any(rv.sc.type(i) == "text" for i in rv.sc.find_withtag("tool"))   # no font symbols
     rv.shutdown()
     app.destroy()

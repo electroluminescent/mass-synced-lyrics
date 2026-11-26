@@ -615,7 +615,13 @@ def test_clear_cache_undoes_alignment_and_forgets_lookups(settings, monkeypatch,
         assert ai_align.align_one(settings, p, al, st, 70)["status"] == "aligned"
         assert "aligned" in st.get_pending(p)[1]
         st.set_override(p, "keep")
+        st.set_song_prefs(p, {"cand": "online", "pins": {"0.50": 2.0, "5.00": 6.0}, "edited": ["0.50", "5.00"],
+                              "ai": ["5.00"], "ends": {"5.00": 7.5}, "ai_ends": ["5.00"], "ai_conf": {"5.00": 0.9},
+                              "ai_stamp": "x", "checkpoints": [1.0]})
         done = st.clear_cache(p)
+        prefs = st.get_song_prefs(p)
+        assert prefs["pins"] == {"0.50": 2.0} and prefs["edited"] == ["0.50"] and prefs["ends"] == {}
+        assert "ai" not in prefs and "ai_stamp" not in prefs and prefs["checkpoints"] == [1.0]
         assert "online lookup" in done and "GPU results" in done and "Find's record" in done
         assert st.get_aligned(p) is None
         st.clear_override(p)                                    # your choices are kept by clear_cache
@@ -705,3 +711,33 @@ def test_lrc_line_insert_and_delete():
     assert [b for _, b in lrc.display_lines(out)] == ["a", "new", "b"] and out.startswith("[ar:x]")
     out = lrc.insert_line(t, 1.0, "a", 0.5, "first", after=False)
     assert [b for _, b in lrc.display_lines(out)][0] == "first"
+
+
+def test_crawling_steps_are_flagged_and_not_learned(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    monkeypatch.setattr(ai_align, "_cost_cache", None)
+    slow = {"separate": 150.0, "align": 4.0}                     # 3.7-min song: ~6 s is normal for separate
+    assert [k for k, _, _ in ai_align.slow_steps(slow, 222)] == ["separate"]
+    before = ai_align.stage_costs()["separate"]
+    ai_align.learn_timings(slow, 222)
+    assert ai_align.stage_costs()["separate"] == before            # not learned
+    # an estimate spoilt by an earlier version is ignored when read
+    import json as _json
+    path = ai_align._timings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump({"separate": [0.3, 40.983], "align": [0.5, 1.1]}, f)
+    monkeypatch.setattr(ai_align, "_cost_cache", None)
+    costs = ai_align.stage_costs()
+    assert costs["separate"] == ai_align.DEFAULT_COST["separate"] and costs["align"] == (0.5, 1.1)
+
+
+def test_service_tells_once_when_the_gpu_crawls(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    events = []
+    svc = ai_align.AlignService(lambda: settings, events.append, lambda s: None)
+    vram = {"total_gb": 8.0, "free_gb": 0.4, "mine_gb": 4.4}
+    svc._check_speed({"separate": 150.0}, 222, vram)
+    svc._check_speed({"separate": 150.0}, 222, vram)
+    msgs = [e["message"] for e in events if e["type"] == "align_slow"]
+    assert len(msgs) == 1 and "3.2 GB" in msgs[0] and "Sysmem Fallback" in msgs[0]

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.9.1
+- **Much faster vocal isolation when GPU memory is short.** On your PC it had slowed to about 41 s per
+  minute of song (normally 1.6 s), with 7.4 of the GPU's 8 GB in use: other programs were using GPU
+  memory too, so Windows was lending the GPU system memory.
+  - Only the model in use is now kept on the GPU: the vocal model while isolating the vocals, the
+    speech model after it. That needs about 3–4 GB instead of 4.5–5 GB.
+  - If a step still crawls, the log says so once, with how much GPU memory other programs are using
+    and what to do.
+  - Crawling times no longer spoil the time estimates, and estimates already spoilt are ignored.
+- **Dragging a bar in Edited moves the whole lyric** (start and end). The lyrics attached after it are
+  stretched or squeezed up to the next gap or the end of the song, and a gap right after it moves
+  along.
+- **The buttons above the needle are drawn shapes** (a target and a copy icon) with hints. Windows
+  fonts have no ⌖ or ⧉, so they showed as boxes. The busy mark in the list is now ↻ (⟳ also showed as
+  a box).
+- **The second default checkpoint is the start of the last lyric**, not of a gap after it.
+
 ## 1.9.0
 - **Four timelines, labelled:** Current, Found, **⚡ Aligned** (the GPU's timing, purple, shaded by
   certainty) and **✎ Edited** (blue: what *Use edited* writes, the only one you can change).

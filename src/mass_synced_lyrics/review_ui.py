@@ -86,20 +86,20 @@ COLUMN_HINTS = {
     "fit": "How well the lyrics in Choice fit this recording: its length, lines past the end, how the lines "
           "spread over the song and, once the audio has been checked, lines that start on silence. "
           "Click the header to filter by it.",
-    "find": "Find lyrics: ⟳ being looked up now · ✓ done · ✗ error.",
-    "align": "Alignment. ⚡ = on the GPU: ⟳ 42% aligning now · ⚡✓ re-timed · ⚡≈ partly: fewer words heard than "
+    "find": "Find lyrics: ↻ being looked up now · ✓ done · ✗ error.",
+    "align": "Alignment. ⚡ = on the GPU: ↻ 42% aligning now · ⚡✓ re-timed · ⚡≈ partly: fewer words heard than "
              "Aligned lyrics must match, so only the lines it was sure of were placed (check it) · "
              "⚡– heard too little, kept as found · "
              "⚡✗ error. ✎ = timing you set yourself in the player (offset, stretch, pins or edited times). "
              "Empty = not aligned.",
-    "save": "Saving (Apply / Save now): ⟳ writing now · ✓ written · – already up to date · ✗ error.",
+    "save": "Saving (Apply / Save now): ↻ writing now · ✓ written · – already up to date · ✗ error.",
 }
 COLUMNS = (("status", 70, "Status"), ("find", 40, "Find"), ("align", 60, "Align"), ("save", 40, "Save"),
-           ("choice", 96, "Choice ⟳"), ("match", 56, "Match"), ("fit", 48, "Fit"),
+           ("choice", 96, "Choice ↻"), ("match", 56, "Match"), ("fit", 48, "Fit"),
            ("local", 58, "Local"), ("online", 66, "Online"))
 OPS = ("find", "align", "save")
-OP_MARK = {"busy": "⟳", "done": "✓", "skip": "–", "fail": "✗", "": ""}
-ALIGN_MARK = {"busy": "⟳", "done": GPU + "✓", "partial": GPU + "≈", "skip": GPU + "–", "fail": GPU + "✗", "": ""}
+OP_MARK = {"busy": "↻", "done": "✓", "skip": "–", "fail": "✗", "": ""}
+ALIGN_MARK = {"busy": "↻", "done": GPU + "✓", "partial": GPU + "≈", "skip": GPU + "–", "fail": GPU + "✗", "": ""}
 
 VIEWS = {"artist": "Artist ▸ Album", "folder": "Folders"}
 VIEW_HEADINGS = {"artist": "Artist ▸ Album ▸ Song", "folder": "Folder ▸ Song"}
@@ -205,6 +205,67 @@ class Bar:
     row: int | None = None               # its row in the Edited list (edit lane only)
     words: list = field(default_factory=list)
     fill: str = ""
+
+
+def move_lyrics(times: list, texts: list, rows, dt: float, duration: float) -> dict:
+    """Move lyrics (rows of the Edited list) by dt, start and end together. The lyrics attached after
+    each (no gap in between) are stretched or squeezed to fill up to the next gap (an empty line) or the
+    end of the song, which stay where they are; a gap right after a moved lyric moves with it, and the
+    lyric before ends where the moved one now starts. Returns {row: new time}."""
+    n = len(times)
+    sel = sorted({r for r in rows if 0 <= r < n and texts[r].strip()})
+    if not sel or not dt:
+        return {}
+    blocks: list[list[int]] = []
+    for r in sel:
+        if blocks and r == blocks[-1][-1] + 1:
+            blocks[-1].append(r)
+        else:
+            blocks.append([r])
+    selected = set(sel)
+    gap = 0.05
+
+    def chain_end(z):
+        """(first row after the attached chain, time it must stay before): a gap, a selected row or the end."""
+        r = z + 1
+        while r < n and texts[r].strip() and r not in selected:
+            r += 1
+        if r >= n:
+            return n, duration
+        return r, times[r]
+
+    lo, hi = -1e9, 1e9
+    for b in blocks:
+        a, z = b[0], b[-1]
+        lo = max(lo, (times[a - 1] + gap - times[a]) if a > 0 else -times[a])
+        nxt = z + 1
+        if nxt < n and not texts[nxt].strip():            # a gap right after: it moves along, the next stays
+            limit = times[nxt + 1] if nxt + 1 < n else duration
+            hi = min(hi, limit - gap - times[nxt])
+        elif nxt < n:                                      # attached lyrics after it: squeezed, at most
+            end_row, end_t = chain_end(z)
+            count = end_row - nxt
+            hi = min(hi, end_t - gap * (count + 1) - times[nxt])
+        else:
+            hi = min(hi, duration - times[z] - gap)
+    dt = max(lo, min(hi, dt))
+    if abs(dt) < 1e-6:
+        return {}
+    out: dict = {}
+    for b in blocks:
+        for r in b:
+            out[r] = round(times[r] + dt, 2)
+        nxt = b[-1] + 1
+        if nxt < n and not texts[nxt].strip():
+            out[nxt] = round(times[nxt] + dt, 2)
+        elif nxt < n:
+            end_row, end_t = chain_end(b[-1])
+            old0, new0 = times[nxt], times[nxt] + dt
+            span = end_t - old0
+            for r in range(nxt, end_row):
+                frac = (times[r] - old0) / span if span > 0 else 0.0
+                out[r] = round(new0 + frac * (end_t - new0), 2)
+    return out
 
 
 def resize_lyric(times: list, texts: list, idx: int, edge: str, t: float, duration: float) -> dict:
@@ -1091,10 +1152,10 @@ class ReviewTab(ttk.Frame):
             vals = {"status": f"{count} song{'s' if count != 1 else ''}",
                     "local": f"{n_local} local" if n_local else "—",
                     "online": f"{n_online} found" if n_online else "—",
-                    "choice": f"⟳ {choice}" if choice else "",
+                    "choice": f"↻ {choice}" if choice else "",
                     "match": f"{low} low" if low else "", "fit": f"{poor} poor" if poor else ""}
             for op in OPS:
-                vals[op] = "⟳" if op_busy[op] else (f"{op_done[op]}✓" if op_done[op] else "")
+                vals[op] = "↻" if op_busy[op] else (f"{op_done[op]}✓" if op_done[op] else "")
             self.tree.item(node, values=tuple(vals[c] for c, _, _ in COLUMNS))
 
     def _update_count(self) -> None:
@@ -1145,11 +1206,11 @@ class ReviewTab(ttk.Frame):
             match = "—" if conf is None else f"{conf:.0f}%"
             fitv = "—" if fit is None else f"{fit:.0f}%"
         vals = {"status": status, "local": r["local"] or "—", "online": r["online"] or "—",
-                "choice": f"⟳ {choice}" if choice else "", "match": match, "fit": fitv}
+                "choice": f"↻ {choice}" if choice else "", "match": match, "fit": fitv}
         for op in OPS:
             vals[op] = OP_MARK.get(r.get("op_" + op, ""), "")
         st = r.get("op_align", "")
-        vals["align"] = (f"⟳ {r['align_pct']:.0f}%" if st == "busy" and r.get("align_pct") is not None
+        vals["align"] = (f"↻ {r['align_pct']:.0f}%" if st == "busy" and r.get("align_pct") is not None
                          else ALIGN_MARK.get(st, ""))
         if not st and r.get("status") == "aligned":
             vals["align"] = ALIGN_MARK["done"]
@@ -1166,7 +1227,7 @@ class ReviewTab(ttk.Frame):
         r["align_pct"] = pct
         if key in self._shown and r.get("op_align") == "busy":
             try:
-                self.tree.set(key, "align", "⟳" if pct is None else f"⟳ {pct:.0f}%")
+                self.tree.set(key, "align", "↻" if pct is None else f"↻ {pct:.0f}%")
             except tk.TclError:
                 pass
 
@@ -1401,7 +1462,7 @@ class ReviewTab(ttk.Frame):
         for col, _, label in COLUMNS:
             v = tk.BooleanVar(value=col in shown)
             self._col_vars[col] = v
-            m.add_checkbutton(label=label.replace(" ⟳", ""), variable=v, command=lambda c=col: self.toggle_column(c))
+            m.add_checkbutton(label=label.replace(" ↻", ""), variable=v, command=lambda c=col: self.toggle_column(c))
         m.add_separator()
         m.add_command(label="Show all columns", command=lambda: self._apply_columns([c for c, _, _ in COLUMNS]))
         return m
@@ -1414,7 +1475,7 @@ class ReviewTab(ttk.Frame):
                 self.add_row(p, None if r.get("status") != "searching" else "", ops={op: ""})
 
     def set_op(self, path: str, op: str, state: str, status: str | None = None) -> None:
-        """Mark a song's progress in one operation column: busy (⟳), done (✓), skip (–), fail (✗)."""
+        """Mark a song's progress in one operation column: busy (↻), done (✓), skip (–), fail (✗)."""
         key = state_key(path)
         if key not in self.rows and not (op == "find" and state == "busy"):
             return                                # only Find adds songs to the list
@@ -2737,6 +2798,21 @@ class ReviewTab(ttk.Frame):
             return
         self._user_edited()
 
+    def forget_gpu_timing(self) -> None:
+        """Clear cached data: the GPU's timing leaves the player (your own times stay)."""
+        for k in list(self.ai_keys):
+            if k in self.pins:
+                del self.pins[k]
+            self.edited.discard(k)
+        for k in list(self.ai_ends):
+            self.end_marks.pop(k, None)
+        self.ai_keys, self.ai_ends, self.ai_conf = set(), set(), {}
+        self._set_aligned(None)
+        if self.cand is not None:
+            self.cand.ai_detail = None
+        self._recompute()
+        self._save_prefs()
+
     def _user_edited(self) -> None:
         """You changed the Edited timeline: it becomes this song's choice (shortly, once you pause)."""
         if self._auto_job is not None:
@@ -3155,7 +3231,8 @@ class ReviewTab(ttk.Frame):
                 self.player.pause()
                 snap = {"state": (dict(self.pins), set(self.edited), dict(self.end_marks), set(self.ai_keys),
                                   set(self.ai_ends)),
-                        "times": {x.key: x.start for x in self.lane_bars["edit"] if x.key}}
+                        "rows": [t for t, _ in self.new_lines], "texts": [x for _, x in self.new_lines],
+                        "row_of": {x.key: x.row for x in self.lane_bars["edit"] if x.key and x.row is not None}}
             self._bar_drag = {"cv": cv, "lane": lane, "x": e.x, "y": e.y, "moved": False, "ctrl": ctrl,
                               "t0": self._t_at(cv, e.x), "bar": b, "snap": snap, "last": 0.0,
                               "was_selected": was_selected, "before": before}
@@ -3233,16 +3310,43 @@ class ReviewTab(ttk.Frame):
         pins, edited, ends, ai_keys, ai_ends = d["snap"]["state"]
         self.pins, self.edited, self.end_marks = dict(pins), set(edited), dict(ends)
         self.ai_keys, self.ai_ends = set(ai_keys), set(ai_ends)
-        dt, dur = d["pending"], self._duration() or 1e9
-        valid = {lrcmod.pin_key(t) for t, b in self.orig_lines if t is not None and b.strip()}
-        for k in self.sel_keys:
-            t = d["snap"]["times"].get(k)
-            if t is None or k not in valid:
-                continue
-            self.pins[k] = round(max(0.0, min(dur, t + dt)), 2)
-            self.edited.add(k)
-            self.ai_keys.discard(k)
+        snap = d["snap"]
+        rows = [snap["row_of"][k] for k in self.sel_keys if k in snap["row_of"]]
+        changes = move_lyrics(snap["rows"], snap["texts"], rows, d["pending"], self._duration() or 1e9)
+        self._apply_row_times(changes, snap["rows"])
         self._recompute()
+
+    def _apply_row_times(self, changes: dict, times: list) -> None:
+        """Set Edited rows to new times: lyrics are pinned there (yours), gaps become end marks."""
+        moved = sorted(i for i in changes if isinstance(i, int))
+        for i in moved:
+            key = self._line_key(i)
+            if key is None:
+                continue
+            v = changes[i]
+            if key.startswith("end:"):
+                k = key[4:]
+                self.end_marks[k] = v
+                self.ai_ends.discard(k)
+            else:
+                self.pins[key] = v
+                self.edited.add(key)
+                self.ai_keys.discard(key)
+        if self._warping() and moved:                      # keep interpolation / ripple from moving the
+            edges = set()                                  # lyrics on either side: pin them where they are
+            for i in moved:
+                for step in (-1, 1):
+                    j = i + step
+                    while 0 <= j < len(times) and j not in changes:
+                        key = self._line_key(j)
+                        if key and not key.startswith("end:") and times[j] is not None:
+                            edges.add(j)
+                            break
+                        j += step
+            for j in edges:
+                key = self._line_key(j)
+                if key not in self.pins:
+                    self.pins[key] = times[j]
 
     def _lane_release(self, e) -> None:
         if self._band is not None:
@@ -3369,7 +3473,7 @@ class ReviewTab(ttk.Frame):
         return False
 
     def next_line_to_needle(self) -> None:
-        """⌖: give the next lyric (the first starting after the needle) the needle's time."""
+        """Target button: give the next lyric (the first starting after the needle) the needle's time."""
         if self.audio is None:
             return
         t = self.player.position()
@@ -3378,10 +3482,10 @@ class ReviewTab(ttk.Frame):
             self.v_ai_note.set("No lyric after the needle.")
             return
         self.set_line_time(nxt.row, round(t, 2))
-        self.v_ai_note.set(f"⌖ “{nxt.text[:40]}” now starts at {lrcmod.format_ts(t)}.")
+        self.v_ai_note.set(f"“{nxt.text[:40]}” now starts at the needle ({lrcmod.format_ts(t)}).")
 
     def copy_needle_time(self) -> None:
-        """⧉: copy the needle's time, to paste into a lyric's timestamp."""
+        """Copy button: copy the needle's time, to paste into a lyric's timestamp."""
         t = self.player.position() if self.audio is not None else 0.0
         txt = lrcmod.format_ts(t)
         try:
@@ -3389,7 +3493,7 @@ class ReviewTab(ttk.Frame):
             self.clipboard_append(txt)
         except tk.TclError:
             return
-        self.v_ai_note.set(f"⧉ Copied {txt}: click a timestamp and paste it (Ctrl+V).")
+        self.v_ai_note.set(f"Copied {txt}: click a timestamp and paste it (Ctrl+V).")
 
     def _sc_click(self, e) -> None:
         if self.audio is None:
@@ -3658,12 +3762,21 @@ class ReviewTab(ttk.Frame):
                         step=1.0 if pps >= 55 else 2.0)
             sc["center"] = c.create_line(0, 0, 0, h, fill=PLAYHEAD, width=2, tags="center")
             # two small buttons riding above the needle: move the next lyric here · copy this time
+            # drawn, not font symbols: Windows fonts lack target / copy symbols (they showed as boxes)
             sc["tools"] = []
-            for name, glyph in (("tool_target", "⌖"), ("tool_copy", "⧉")):
-                bg = c.create_rectangle(0, 0, 0, 0, fill="#2b3442", outline=PLAYHEAD, tags=("tool", name))
-                tx = c.create_text(0, 0, text=glyph, fill="#ffffff", font=("TkDefaultFont", 10, "bold"),
-                                   tags=("tool", name))
-                sc["tools"].append((bg, tx))
+
+            def tool(kind, shape, rel, **kw):
+                item = getattr(c, "create_" + shape)(*rel, tags=("tool", kind), **kw)
+                sc["tools"].append((item, rel))
+            for kind, ox in (("tool_target", -14), ("tool_copy", 14)):
+                tool(kind, "rectangle", (ox - 11, 1, ox + 11, 21), fill="#2b3442", outline=PLAYHEAD)
+            # target: a ring with cross hairs (the next lyric comes to the needle)
+            tool("tool_target", "oval", (-19, 6, -9, 16), outline="#ffffff", width=2)
+            for rel in ((-14, 3, -14, 9), (-14, 13, -14, 19), (-22, 11, -16, 11), (-12, 11, -6, 11)):
+                tool("tool_target", "line", rel, fill="#ffffff", width=2)
+            # copy: two overlapping sheets
+            tool("tool_copy", "rectangle", (8, 4, 16, 14), outline="#ffffff", width=1)
+            tool("tool_copy", "rectangle", (12, 8, 20, 18), outline="#ffffff", fill="#2b3442", width=2)
             self._scene = sc
         lanes = self._lanes_ver
         if sc["lanes"] != lanes:
@@ -3758,9 +3871,8 @@ class ReviewTab(ttk.Frame):
         cx = left + w / 2
         h = int(c.cget("height"))
         c.coords(sc["center"], cx, 0, cx, h)
-        for (bg, tx), dx in zip(sc.get("tools", []), (-13, 13)):
-            c.coords(bg, cx + dx - 10, 1, cx + dx + 10, 19)
-            c.coords(tx, cx + dx, 10)
+        for item, rel in sc.get("tools", []):
+            c.coords(item, *[cx + v if i % 2 == 0 else v for i, v in enumerate(rel)])
         c.tag_raise("tool")
         view_t = (left - pad) / pps                        # time at the view's left edge
         for which, (segs, prog, word, texts, sticky) in sc.get("lane_items", {}).items():
@@ -3834,6 +3946,18 @@ class ReviewTab(ttk.Frame):
             elif self.has_edits():
                 parts.append("Edited line: moved along with the others")
         cv = e.widget
+        if cv is self.sc and self.audio is not None:
+            x = self.sc.canvasx(e.x)
+            tags = {t for it in self.sc.find_overlapping(x - 1, e.y - 1, x + 1, e.y + 1)
+                    for t in self.sc.gettags(it)}
+            if "tool_target" in tags or "tool_copy" in tags:
+                self.sc.configure(cursor="hand2")
+                tip = ("Move the next lyric here: the first lyric after the needle starts at "
+                       f"{lrcmod.format_ts(self.player.position())}" if "tool_target" in tags else
+                       f"Copy the needle's time ({lrcmod.format_ts(self.player.position())}) to paste into a "
+                       "lyric's timestamp (click it, Ctrl+V)")
+                self.tooltip.show(tip, e.x_root, e.y_root)
+                return
         lane = self._lane_at(cv, e.y)
         if cv is self.sc:
             edge = self._edge_at(e.x, e.y)
@@ -3849,7 +3973,7 @@ class ReviewTab(ttk.Frame):
                          "drag a lyric's start (or its end before a gap) to stretch it")
         else:
             parts.append("Click: jump · drag: scrub" + (" · Ctrl+click: add/remove checkpoint" if cv is self.ov
-                                                       else " · ⌖ next lyric to the needle · ⧉ copy the time"))
+                                                       else " · buttons above the needle: next lyric here, copy the time"))
         self.tooltip.show("\n".join(parts), e.x_root, e.y_root)
 
     # ============================================================ playback

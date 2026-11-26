@@ -71,6 +71,7 @@ class Worker:
         self._req = None                  # id of the request being worked on (for progress messages)
         self._pre: dict = {}              # audio path -> (thread, [decoded mix or error]) read ahead
         self._sep_len = 0
+        self._on_gpu: str | None = None   # which model is on the GPU now: "demucs" or "whisper"
         self._stage = None
         self._stage_t0 = 0.0
         self._last_emit = 0.0
@@ -116,7 +117,12 @@ class Worker:
             self._whisper = m
         else:
             import stable_whisper
+            if self.device == "cuda" and self._demucs is not None:
+                self._demucs.to("cpu")                      # make room before loading
+                import torch
+                torch.cuda.empty_cache()
             self._whisper = stable_whisper.load_model(self.model_name, device=self.device)
+        self._on_gpu = "whisper"
 
     @property
     def demucs(self):
@@ -128,7 +134,9 @@ class Worker:
             else:
                 from demucs.pretrained import get_model
                 self._demucs = get_model("htdemucs")
-            self._demucs.to(self.device).eval()
+            self._demucs.eval()
+            self._on_gpu = None
+            self._place("demucs")
         return self._demucs
 
     def vocals_16k(self, path: str):
@@ -142,6 +150,7 @@ class Worker:
             mix = self._decoded(path, model.samplerate)
             self.duration = mix.shape[-1] / model.samplerate
             self.stage("separate")
+            self._place("demucs")
             self._sep_len = mix.shape[-1]
             ref = mix.mean(0)
             mean, std = ref.mean(), ref.std() + 1e-8
@@ -183,6 +192,22 @@ class Worker:
             if box and r == rate and not isinstance(box[0], Exception):
                 return box[0]
         return _decode(path, rate)
+
+    def _place(self, which: str) -> None:
+        """Keep only the model in use on the GPU (the other waits in system memory). Both together need
+        about 4.5 GB; with other programs using GPU memory, Windows starts lending system memory to the
+        GPU, which made vocal isolation 25x slower. Moving a model takes well under a second."""
+        if self.device != "cuda" or self._on_gpu == which:
+            return
+        import torch
+        other = self._whisper if which == "demucs" else self._demucs
+        mine = self._demucs if which == "demucs" else self._whisper
+        if other is not None:
+            other.to("cpu")
+        torch.cuda.empty_cache()
+        if mine is not None:
+            mine.to(self.device)
+        self._on_gpu = which
 
     def _free(self) -> None:
         import gc
@@ -228,6 +253,7 @@ class Worker:
         if len(lines) < 2:
             return {"ok": False, "error": "fewer than 2 lyric lines"}
         self._req, self.timings, self.duration = req.get("id"), {}, 0.0
+        vram = self._vram_start()
         try:
             try:
                 out = self._align(req, lines)
@@ -243,11 +269,33 @@ class Worker:
             self._req = None
         out["timings"] = self.timings
         out["duration"] = round(self.duration, 2)
+        if vram:
+            try:
+                import torch
+                vram["peak_gb"] = round(torch.cuda.max_memory_reserved() / 2 ** 30, 2)
+            except Exception:
+                pass
+            out["vram"] = vram
         return out
+
+    def _vram_start(self) -> dict:
+        """GPU memory: total, and free when this song starts (other programs use it too)."""
+        if self.device != "cuda":
+            return {}
+        try:
+            import torch
+            torch.cuda.reset_peak_memory_stats()
+            free, total = torch.cuda.mem_get_info()
+            return {"free_gb": round(free / 2 ** 30, 2), "total_gb": round(total / 2 ** 30, 2),
+                    "mine_gb": round(torch.cuda.memory_reserved() / 2 ** 30, 2)}
+        except Exception:
+            return {}
 
     def _align(self, req: dict, lines: list) -> dict:
         audio = self.vocals_16k(req["audio"])
+        self._free()                                  # the separation's working memory
         self.whisper                                  # loads the speech model the first time (its own step)
+        self._place("whisper")
         self.stage("language")
         lang = req.get("language") or self.detect_language(audio, float(req.get("probe") or 0))
         self.stage("align")

@@ -362,6 +362,17 @@ class State:
             self.db.execute("DELETE FROM aligned WHERE path=?", (path,))
             if "GPU results" not in done:
                 done.append("GPU results")
+        prefs = self.get_song_prefs(path)
+        if prefs and (prefs.get("ai") or prefs.get("ai_ends") or prefs.get("aligned") or prefs.get("ai_stamp")):
+            ai = set(prefs.get("ai") or [])                # the player's copy of the GPU timing goes too;
+            pins = {k: v for k, v in (prefs.get("pins") or {}).items() if k not in ai}   # yours stay
+            prefs["pins"] = pins
+            prefs["edited"] = [k for k in prefs.get("edited") or [] if k not in ai]
+            ends = prefs.get("ends") or {}
+            prefs["ends"] = {k: v for k, v in ends.items() if k not in set(prefs.get("ai_ends") or [])}
+            for k in ("ai", "ai_ends", "ai_conf", "ai_stamp", "aligned"):
+                prefs.pop(k, None)
+            self.set_song_prefs(path, prefs)
         if self.db.execute("UPDATE files SET size=-1 WHERE path=?", (path,)).rowcount:
             done.append("Find's record")
         self._tick()
