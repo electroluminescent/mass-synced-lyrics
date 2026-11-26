@@ -886,6 +886,19 @@ def test_player_auto_align_heard_lane_ripple_and_live_plot(settings, tmp_path, m
     assert [t for t, _ in rv.new_lines] == [2.0, 5.0, 8.0]
     assert rv.ai_keys == set(rv.pins) and len(rv.ai_keys) == 3
     assert rv.txt_new.tag_ranges("ai_edited") and "Aligned: 100% of words heard" in rv.v_ai_note.get()
+    assert not lrc.WORD_TS_RE.search(rv.new_text)
+    # lines and words (dropdown): every word timed, and they move with their line
+    app.settings.word_sync_warned = True
+    rv.auto_align(words=True)
+    assert _pump(app, lambda: rv._align_req is None)
+    assert "word-synced" in rv.v_ai_note.get()
+    assert "[00:02.00]<00:02.00>Other <00:02.75>first" in rv.new_text
+    rv.set_line_time(0, 2.5)
+    assert "[00:02.50]<00:02.50>Other <00:03.25>first" in rv.new_text
+    rv.set_line_time(0, None)
+    rv.auto_align(words=False)                                 # back to the line
+    assert _pump(app, lambda: rv._align_req is None)
+    assert not lrc.WORD_TS_RE.search(rv.new_text)
     # the Edited lane shows the edited lyrics, shaded by how surely each line was heard
     assert rv.has_edits() and rv.edited_segs() and rv.ai_conf
     rv._draw_overview()
@@ -1252,9 +1265,33 @@ def test_auto_align_button_belongs_to_its_song_and_shows_progress(settings, tmp_
     # right-click → Align on the GPU queues the songs whatever their scores (offering to switch it on)
     queued = []
     monkeypatch.setattr(app, "_ensure_ai", lambda: True)
-    monkeypatch.setattr(app, "queue_alignment", lambda songs, force=False: queued.append((songs, force)) or 1)
+    monkeypatch.setattr(app, "queue_alignment",
+                        lambda songs, force=False, words=None: queued.append((songs, force, words)) or 1)
     app.align_command("songs", [k])
-    assert queued == [([k], True)]
+    assert queued == [([k], True, None)]
+    # … or to the word: a warning first, once (Cancel backs out)
+    from mass_synced_lyrics import gui as gui_mod
+    asked = []
+    monkeypatch.setattr(gui_mod.messagebox, "askokcancel", lambda *a, **kw: asked.append(a) or len(asked) > 1)
+    app.align_command("songs", [k], words=True)
+    assert len(queued) == 1 and not app.settings.word_sync_warned
+    app.align_command("songs", [k], words=True)
+    assert queued[-1] == ([k], True, True) and app.settings.word_sync_warned and "less accurate" in asked[0][1]
+    assert "Review every song" in asked[0][1]
+    app.align_command("songs", [k], words=False)
+    assert queued[-1] == ([k], True, False) and len(asked) == 2                 # not asked again
+    # the setting: Synced lyrics to the line / to the word
+    app.v_sync.set("word")
+    app._sync_toggled()
+    assert app.settings.sync_words and len(asked) == 2
+    from mass_synced_lyrics.config import load_settings
+    assert load_settings().sync_words and load_settings().word_sync_warned
+    app.v_sync.set("line")
+    app._sync_toggled()
+    assert not app.settings.sync_words
+    # the Auto-align dropdown: lines, or lines and words
+    labels = [rv.ai_menu.entrycget(i, "label") for i in range(rv.ai_menu.index("end") + 1)]
+    assert len(labels) == 2 and "word-synced" in labels[1]
     # the Align column: GPU marks, progress while busy, and your own timing
     rv.set_op(k, "align", "busy")
     rv.set_align_pct(k, 37)

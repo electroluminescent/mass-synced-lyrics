@@ -307,6 +307,43 @@ def test_live_recording_talk_is_skipped_and_lines_go_where_they_are_sung():
     assert not bad.ok and bad.verify < 20 and "sung" in bad.reason
 
 
+def test_word_synced_lyrics_time_every_word_from_what_was_heard():
+    tr = (_words("Paper boats along the canal", 11.0, 0.5) + _words("Carry every name I knew", 15.0, 0.4)
+          + _words("Lanterns on the", 19.0) + _words("And the river takes them through", 23.0)   # "water fall" unheard
+          + _words("Morning comes with copper light", 27.0) + _words("Every window turning gold", 31.0))
+    res = {"ok": True, "segments": [], "transcript": tr}
+    plain = ai_align.evaluate(LIVE, res, 60.0, 70)
+    assert not plain.words and not ai_align.has_word_times(plain.text)
+    out = ai_align.evaluate(LIVE, res, 60.0, 70, words=True)
+    assert out.ok and out.words and ai_align.has_word_times(out.text)
+    assert lrc.display_lines(out.text) == lrc.display_lines(plain.text)       # line times and text unchanged
+    rows = [ln for ln in out.text.splitlines() if "<" in ln]
+    assert len(rows) == 6
+    first = [lrc._ts_to_seconds(m) for m in lrc.WORD_TS_RE.finditer(rows[0])]
+    start = lrc.display_lines(out.text)[0][0]
+    assert first == [start, 11.5, 12.0, 12.5, 13.0]                         # first with the line, the rest as sung
+    stamp = lrc.format_ts(start)
+    assert rows[0].startswith(f"[{stamp}]<{stamp}>Paper <00:11.50>boats")
+    third = [lrc._ts_to_seconds(m) for m in lrc.WORD_TS_RE.finditer(rows[2])]
+    assert abs(third[0] - 19.0) < 0.1 and third[1:3] == [19.3, 19.6] and len(third) == 5
+    assert all(a < b for a, b in zip(third, third[1:])) and third[-1] < 23.0  # unheard words: in order, in the line
+    for row in rows:                                                          # every word, inside its line
+        ts = [lrc._ts_to_seconds(m) for m in lrc.WORD_TS_RE.finditer(row)]
+        assert len(ts) == len(lrc.WORD_TS_RE.sub("", row.split("]", 1)[1]).split())
+        assert all(a < b for a, b in zip(ts, ts[1:]))
+    assert "<00:13.50>boats" in lrc.retime(out.text, 2.0)                    # shifting keeps words with lines
+    # an edit moves a line: its words follow, squeezed when the next line now comes sooner
+    lines_only = lrc.WORD_TS_RE.sub("", out.text).splitlines()
+    lines_only[0] = "[00:12.00]" + lines_only[0].split("]", 1)[1]
+    lines_only[1] = "[00:13.00]" + lines_only[1].split("]", 1)[1]
+    lines_only = "\n".join(lines_only)
+    moved = lrc.carry_word_times(lines_only, out.text)
+    ts = [lrc._ts_to_seconds(m) for m in lrc.WORD_TS_RE.finditer(moved.splitlines()[0])]
+    assert ts[0] == 12.0 and ts[-1] < 13.0 and all(a < b for a, b in zip(ts, ts[1:]))
+    assert lrc.display_lines(moved) == lrc.display_lines(lines_only)
+    assert lrc.carry_word_times(lines_only, plain.text) == lines_only            # nothing to carry
+
+
 def test_words_stretched_over_silence_are_not_used_for_line_starts():
     tr = [[" Paper", 2.0, 10.9, 0.6]] + _words("boats along the canal", 11.3) + \
         _words("Carry every name I knew", 15.0) + _words("Lanterns on the water fall", 19.0) + \
@@ -438,6 +475,24 @@ def test_service_retries_a_crashed_worker_and_force_realigns_from_the_original(s
         assert st.get_pending(p)[1].count("aligned") == 1
     finally:
         st.close()
+    # to the word: judged again from the cached GPU result (no GPU), every word timed; and back
+    for words in (True, False):
+        events.clear()
+        svc.submit([p], force=True, words=words)
+        assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
+        ev = next(e for e in events if e.get("type") == "align_progress")
+        assert ev["status"] == "aligned" and ev["cached"] and not ev["reason"].startswith("already")
+        st = State(settings.resolved_state_db())
+        try:
+            text, label = st.get_pending(p)[2], st.get_pending(p)[1]
+            assert ai_align.has_word_times(text) == words and ("word-synced" in label) == words
+            assert [t for t, _ in lrc.display_lines(text)] == [3.0, 6.0, 9.0] and label.count("aligned") == 1
+        finally:
+            st.close()
+    events.clear()
+    svc.submit([p], force=True, words=False)                  # lines again: nothing changed, skipped
+    assert _wait(lambda: any(e.get("type") == "align_progress" for e in events))
+    assert next(e for e in events if e.get("type") == "align_progress")["reason"].startswith("already")
     svc.stop()
     svc.join(5)
 

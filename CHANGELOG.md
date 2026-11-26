@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.10.0
+- **Word-synced lyrics.** *Synced lyrics: To the line / ⚡ To the word* on the Find lyrics tab. To the
+  word writes enhanced LRC: every word gets its own time.
+  - Word times come only from the GPU aligner. Each word is placed where it was heard being sung, or
+    where the forced alignment put it when that agrees with the line's start. The first word starts
+    with the line, and words in between are shared out by length.
+  - The first time, a warning explains that it is less accurate, with little reference (online lyrics
+    are almost never word-synced), and recommends reviewing every song before saving.
+  - In word mode every song with found lyrics is aligned. Songs aligned before are judged again from
+    the cached GPU result, without the GPU.
+  - Saving word-synced songs asks you to confirm, recommending a review of each one.
+- **Auto-align ▾** in the player: *Auto-align lines* or *Auto-align lines and words (word-synced)*.
+  Edited lines keep their words, which move along (and are squeezed to fit before the next line).
+- **Right-click → ⚡ Align on the GPU** is now a submenu: *Lines* or *Lines and words (word-synced)*.
+
 ## 1.9.1
 - **Much faster vocal isolation when GPU memory is short.** On your PC it had slowed to about 41 s per
   minute of song (normally 1.6 s), with 7.4 of the GPU's 8 GB in use: other programs were using GPU

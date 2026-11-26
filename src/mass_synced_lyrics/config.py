@@ -47,6 +47,8 @@ class Settings:
     ai_align_min: int = 70               # ... keep the re-timed lyrics only when this % of words is heard
     ai_align_model: str = "medium"       # Whisper model for the alignment
     ai_align_all: bool = False           # align every song with found lyrics, not only low-confidence ones
+    sync_words: bool = False             # synced lyrics to the word (enhanced LRC, from the GPU), not only the line
+    word_sync_warned: bool = False       # the word-synced warning was shown
     ignore_cache: bool = False           # look everything up / align again instead of reusing earlier results
     ai_keep_loaded: bool = True          # keep the GPU worker and its models loaded between songs and runs
     ripple: bool = False

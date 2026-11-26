@@ -134,6 +134,7 @@ class App(tk.Tk):
         self.v_ai_keep = tk.BooleanVar(value=True)
         self.v_ignore_cache = tk.BooleanVar(value=False)
         self.v_ai_all = tk.BooleanVar(value=False)
+        self.v_sync = tk.StringVar(value="line")          # synced lyrics: "line" | "word"
         self._held_aligner = None
         self._held_lock = threading.Lock()
         self.v_ai_min = tk.IntVar()
@@ -195,6 +196,20 @@ class App(tk.Tk):
                  self._keep_loaded_toggled))):
             theme.hint(ttk.Checkbutton(lib, text=text, variable=var, style=sw, command=cmd), tip).grid(
                 row=11 + i, column=0, columnspan=2, sticky="w", pady=(6 if i == 0 else 2, 0))
+        syf = ttk.Frame(lib, style="Card.TFrame" if theme._state["sv"] else "TFrame")
+        syf.grid(row=15, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        sync_tip = ("To the line: each line gets a time (standard synced lyrics, as found online).\n"
+                    "To the word: every word gets a time too (enhanced LRC, for karaoke-style players). Online "
+                    "lyrics are almost never timed to the word, so the word times come only from the GPU aligner "
+                    "listening to the song: less accurate, with little to check them against. Every song is "
+                    "aligned; review each one before saving.")
+        theme.hint(ttk.Label(syf, text="Synced lyrics"), sync_tip).pack(side="left", padx=(0, 10))
+        self.rb_sync = []
+        for val, text in (("line", "To the line"), ("word", GPU + " To the word")):
+            rb = theme.hint(ttk.Radiobutton(syf, text=text, value=val, variable=self.v_sync,
+                                            command=self._sync_toggled), sync_tip)
+            rb.pack(side="left", padx=(0, 12))
+            self.rb_sync.append(rb)
         for label, widget in (("After using a sidecar .lrc", "action"), ("Match confidence (70–100)", "thr"),
                               ("High confidence (50–100)", "conf"), ("Good fit (0–100)", "fit"),
                               ("Aligned lyrics must match (50–100)", "aimin"), ("When the app starts", "session")):
@@ -372,6 +387,7 @@ class App(tk.Tk):
         self.v_ai_keep.set(bool(getattr(s, "ai_keep_loaded", True)))
         self.v_ignore_cache.set(bool(getattr(s, "ignore_cache", False)))
         self.v_ai_all.set(bool(getattr(s, "ai_align_all", False)))
+        self.v_sync.set("word" if getattr(s, "sync_words", False) else "line")
         self.v_ai_min.set(snap5(s.ai_align_min, 50, 100))
         self.v_fit_audio.set(bool(s.fit_audio))
         self.v_only_found.set(bool(s.only_found))
@@ -403,6 +419,7 @@ class App(tk.Tk):
         s.ai_keep_loaded = bool(self.v_ai_keep.get())
         s.ignore_cache = bool(self.v_ignore_cache.get())
         s.ai_align_all = bool(self.v_ai_all.get())
+        s.sync_words = self.v_sync.get() == "word"
         s.ai_align_min = self._ai_min_value()
         s.only_found = bool(self.v_only_found.get())
         s.output_mode = self.v_output.get()
@@ -455,6 +472,10 @@ class App(tk.Tk):
         if not s.music_folder or not os.path.isdir(s.music_folder):
             messagebox.showerror(APP_TITLE, "Choose an existing music folder first.")
             return
+        if s.sync_words and not s.word_sync_warned:            # first run to the word: warn once
+            if not self._warn_word_sync():
+                self.v_sync.set("line")
+                s.sync_words = False
         self.activity.set("find", "Finding lyrics", None, detail="starting…", stop=self._stop)
         self.review.clear_list()                  # the list shows this run's songs only
         self.session_changed()
@@ -744,6 +765,60 @@ class App(tk.Tk):
         except OSError:
             pass
 
+    WORD_SYNC_WARNING = (
+        "Word-synced lyrics are less accurate than line-synced ones.\n\n"
+        "Online lyrics are almost never timed to the word, so every word's time comes only from the GPU aligner "
+        "listening to the song, and there is little reference to check it against. Words it can't hear clearly "
+        "are spread out between the ones it can.\n\n"
+        "Every song with found lyrics is aligned on the GPU (songs aligned before are redone from the cached "
+        "result, without the GPU).\n\n"
+        "Review every song in Review & player before saving.")
+
+    def _warn_word_sync(self) -> bool:
+        """The word-synced warning, shown once. False: the user backed out (back to the line)."""
+        if getattr(self.settings, "word_sync_warned", False):
+            return True
+        ok = messagebox.askokcancel(APP_TITLE, self.WORD_SYNC_WARNING + "\n\nSync lyrics to the word?",
+                                    icon="warning")
+        if ok:
+            self.settings.word_sync_warned = True
+        return ok
+
+    def _sync_toggled(self) -> None:
+        words = self.v_sync.get() == "word"
+        if words:
+            if not self._warn_word_sync():
+                self.v_sync.set("line")
+                return
+            if not self.settings.ai_align and not self.activity.is_active("install"):
+                if not self._ensure_ai() and not self.activity.is_active("install"):
+                    self.v_sync.set("line")
+                    return
+        self.settings.sync_words = words
+        try:
+            save_settings(self._collect_settings())
+        except OSError:
+            pass
+        self._log("Synced lyrics: to the word — every song is aligned on the GPU; review each before saving."
+                  if words else "Synced lyrics: to the line.")
+
+    def _word_synced(self, paths) -> int:
+        """How many of these songs would be saved with word-synced lyrics."""
+        from .ai_align import has_word_times
+        from .state import State
+
+        st = State(self.settings.resolved_state_db())
+        n = 0
+        try:
+            for p in paths:
+                ov = st.get_override(p)
+                row = ov if ov is not None and ov[1] else st.get_pending(p)
+                text = (ov[1] if row is ov else row[2]) if row else ""
+                n += bool(has_word_times(text))
+        finally:
+            st.close()
+        return n
+
     def _keep_loaded_toggled(self) -> None:
         self.settings.ai_keep_loaded = bool(self.v_ai_keep.get())
         try:
@@ -767,11 +842,12 @@ class App(tk.Tk):
         if svc is not None:
             svc.prioritize(paths)
 
-    def queue_alignment(self, paths, force: bool = False) -> int:
-        """Queue songs for the GPU aligner (runs alongside Find). force=True: whatever their scores."""
+    def queue_alignment(self, paths, force: bool = False, words: bool | None = None) -> int:
+        """Queue songs for the GPU aligner (runs alongside Find). force=True: whatever their scores.
+        words: word-synced lyrics (None = the Synced lyrics setting)."""
         if not self.settings.ai_align or not paths:
             return 0
-        n = self._align_service().submit(paths, force=force)
+        n = self._align_service().submit(paths, force=force, words=words)
         if n:
             self.btn_stop.config(state="normal")
             self._align_activity()
@@ -959,6 +1035,12 @@ class App(tk.Tk):
         s = self._collect_settings()
         paths = plan_confident(s, self._session_paths())
         if paths:
+            w = self._word_synced(paths)
+            if w and not messagebox.askyesno(
+                    APP_TITLE, f"{w} of these {len(paths)} song(s) have word-synced lyrics. Their word times "
+                               "come only from the GPU aligner, so reviewing every one in the player before "
+                               "saving is recommended.\n\nSave them now anyway?", icon="warning"):
+                return
             self.apply_paths(paths, confirm=False)
 
     def apply_paths(self, paths: list[str] | None, confirm: bool = True) -> None:
@@ -983,6 +1065,10 @@ class App(tk.Tk):
             msg += "\n\nUsed sidecar .lrc files will be permanently deleted."
         elif s.lrc_action == "recycle":
             msg += "\n\nUsed sidecar .lrc files will be moved to the Recycle Bin."
+        w = self._word_synced(plan(s, paths)) if confirm else 0
+        if w:
+            msg += (f"\n\n{w} of them have word-synced lyrics: their word times come only from the GPU aligner. "
+                    "Reviewing every one in the player first is recommended.")
         if confirm and not messagebox.askyesno(APP_TITLE, msg):
             return
         save_settings(s)
@@ -1444,11 +1530,14 @@ class App(tk.Tk):
             self.review.load_song(self.review.song.path)
         self.refresh_apply_bar()
 
-    def align_command(self, which: str, songs: list[str] | None = None) -> None:
+    def align_command(self, which: str, songs: list[str] | None = None, words: bool | None = None) -> None:
         """The Align (GPU) buttons: "low" = the low-confidence songs in the list, "selected" = the
-        songs selected in Review & player, "songs" = these songs (right-click → Align on the GPU)."""
+        songs selected in Review & player, "songs" = these songs (right-click → Align on the GPU).
+        words: word-synced lyrics (None = the Synced lyrics setting)."""
         from . import ai_align
 
+        if words and not self._warn_word_sync():
+            return
         if not self._ensure_ai():
             return
         if which == "all":
@@ -1456,7 +1545,7 @@ class App(tk.Tk):
             if not songs:
                 messagebox.showinfo(APP_TITLE, "There are no songs in the Review & player list.")
                 return
-            n = self.queue_alignment(songs, force=True)
+            n = self.queue_alignment(songs, force=True, words=words)
             self._log(f"Align: {n} song(s) queued for the GPU (songs already aligned are skipped quickly).")
             return
         if which in ("selected", "songs"):
@@ -1464,7 +1553,9 @@ class App(tk.Tk):
             if not songs:
                 messagebox.showinfo(APP_TITLE, "Select songs in the Review & player list first.")
                 return
-            n = self.queue_alignment(songs, force=True)
+            n = self.queue_alignment(songs, force=True, words=words)
+            if words:
+                self._log(f"Align: {n} song(s) queued for word-synced lyrics — review each before saving.")
             if n < len(songs):
                 self._log(f"Align: {len(songs) - n} of the {len(songs)} song(s) were already waiting.")
         else:
@@ -1582,7 +1673,7 @@ class App(tk.Tk):
                 self._first_reviewable(r.path)
             if r.status == "proposed" and self.settings.ai_align:
                 from .ai_align import is_low_confidence
-                if getattr(self.settings, "ai_align_all", False):
+                if getattr(self.settings, "ai_align_all", False) or getattr(self.settings, "sync_words", False):
                     self.queue_alignment([r.path], force=True)   # every song, while Find carries on
                 elif is_low_confidence(self.settings, r.score, r.fit):
                     self.queue_alignment([r.path])            # aligned on the GPU while Find carries on
@@ -1627,7 +1718,7 @@ class App(tk.Tk):
                 self.review.tree.selection_set(first)
                 self.review.tree.see(first)
             if self.settings.ai_align and not e["cancelled"]:
-                if getattr(self.settings, "ai_align_all", False):
+                if getattr(self.settings, "ai_align_all", False) or getattr(self.settings, "sync_words", False):
                     self.align_paths(self._session_paths(), everything=True)
                 else:
                     self.align_paths(None, everything=False)  # also low-confidence songs from earlier runs

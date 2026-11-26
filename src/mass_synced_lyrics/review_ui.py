@@ -716,6 +716,16 @@ class ReviewTab(ttk.Frame):
                                  "follow. Progress shows here and at the top. The result is the Aligned timeline; "
                                  "⇣ Found → Edited goes back to the found timing.")
         self.btn_ai.pack(side="left", padx=(6, 0))
+        self.mb_ai = theme.hint(ttk.Menubutton(tm3, text="▾", width=2, takefocus=0),
+                                "Auto-align to the line, or to the line and every word (word-synced lyrics: less "
+                                "accurate, from the GPU only — review the whole song before saving).")
+        self.mb_ai.pack(side="left")
+        self.ai_menu = tk.Menu(self.mb_ai, tearoff=0)
+        self.ai_menu.add_command(label=GPU + " Auto-align lines", command=lambda: self.auto_align(words=False))
+        self.ai_menu.add_command(label=GPU + " Auto-align lines and words (word-synced)",
+                                 command=lambda: self.auto_align(words=True))
+        self.mb_ai["menu"] = self.ai_menu
+        self._align_words = False
         self.v_ripple = tk.BooleanVar(value=bool(getattr(self.app.settings, "ripple", False)))
         theme.hint(ttk.Checkbutton(tm2, text="Ripple changes", variable=self.v_ripple, command=self._ripple_toggled,
                                    style="Switch.TCheckbutton" if theme._state["sv"] else "TCheckbutton"),
@@ -1685,8 +1695,11 @@ class ReviewTab(ttk.Frame):
         m.add_command(label="Don't change", command=lambda: self.set_many(songs, "keep"))
         m.add_command(label="Reset to default", command=lambda: self.reset_many(songs))
         if hasattr(self.app, "align_command"):
-            m.add_command(label=f"{GPU} Align on the GPU ({what})",
-                          command=lambda: self.app.align_command("songs", songs))
+            sub = tk.Menu(m, tearoff=0)
+            sub.add_command(label="Lines", command=lambda: self.app.align_command("songs", songs, words=False))
+            sub.add_command(label="Lines and words (word-synced)",
+                            command=lambda: self.app.align_command("songs", songs, words=True))
+            m.add_cascade(label=f"{GPU} Align on the GPU ({what})", menu=sub)
         if hasattr(self.app, "clear_cache_command"):
             m.add_command(label=f"Clear cached data ({what})…", command=lambda: self.app.clear_cache_command(songs))
         m.add_separator()
@@ -2293,6 +2306,8 @@ class ReviewTab(ttk.Frame):
             timed = lrcmod.retime(text, self.offset, self.factor, self.pins, self._warping(), mode=self._mode(),
                                   duration=self._duration() or None)
             text = lrcmod.insert_blank_lines(timed, self._end_mark_times(plain, lrcmod.display_lines(timed)))
+            if self.aligned_text and lrcmod.WORD_TS_RE.search(self.aligned_text):
+                text = lrcmod.carry_word_times(text, self.aligned_text)   # word-synced: words move with lines
         else:
             self.orig_lines = []
         if text:
@@ -2893,14 +2908,19 @@ class ReviewTab(ttk.Frame):
                 c.text = orig                      # same result, shown as edits on the original timing
                 c.ai_detail = det
 
-    def auto_align(self) -> None:
-        """Auto-align (GPU) button: align the lyrics in the New pane to this song's vocals."""
+    def auto_align(self, words: bool | None = None) -> None:
+        """Auto-align (GPU) button: align the lyrics in the New pane to this song's vocals.
+        words: word-synced too (None = the Synced lyrics setting)."""
         from . import ai_align
 
         if self.song is None or self.cand is None or not self.cand.synced or not self.cand.text:
             messagebox.showinfo(APP_TITLE, "Choose synced lyrics in the New pane first.")
             return
         app = self.app
+        if words is None:
+            words = bool(getattr(app.settings, "sync_words", False))
+        if words and hasattr(app, "_warn_word_sync") and not app._warn_word_sync():
+            return
         if not app._ensure_ai():
             return                                       # refused, no GPU, or installing: try again after
         items = ai_align.lyric_lines(self.cand.text)
@@ -2909,6 +2929,7 @@ class ReviewTab(ttk.Frame):
             return
         n = (self._align_req[2] + 1) if self._align_req else 1
         self._align_req = (self.song.path, self.cand.key, n)
+        self._align_words = bool(words)
         svc = app._align_service()
         if svc.paused:
             self.v_ai_note.set("Waiting — aligning is paused (see the message)")
@@ -2933,6 +2954,7 @@ class ReviewTab(ttk.Frame):
                                    text=f"{GPU} Aligning… {pct:.0f}%" if pct is not None else f"{GPU} Aligning…")
             else:
                 self.btn_ai.config(state="normal", text=GPU + " Auto-align (GPU)")
+            self.mb_ai.config(state="disabled" if mine else "normal")
         except tk.TclError:
             pass
 
@@ -2974,7 +2996,8 @@ class ReviewTab(ttk.Frame):
             self.v_ai_note.set(f"Auto-align failed: {res.get('error', 'unknown error')}")
             return
         minimum = float(getattr(self.app.settings, "ai_align_min", 70))
-        out = ai_align.evaluate(self.cand.text, res, self._duration() or None, minimum, self._mode())
+        words = self._align_words
+        out = ai_align.evaluate(self.cand.text, res, self._duration() or None, minimum, self._mode(), words=words)
         if not out.ok:
             self.v_ai_note.set(f"Not applied — {out.reason}.")
             return
@@ -3006,6 +3029,8 @@ class ReviewTab(ttk.Frame):
         self._recompute()
         follow = "ripple around them" if self._ripple_on() else "are interpolated"
         kept = f"; kept your {len(mine)} edited time(s)" if mine else ""
+        if out.words:
+            kept += " · word-synced: review the whole song before saving"
         if out.partial:
             self.v_ai_note.set(f"{GPU} Partly aligned: {out.verify:.0f}% of words heard (below your {minimum:.0f}%), so "
                                f"only the {len(self.ai_keys)} of {out.lines} lines it was sure of were placed "

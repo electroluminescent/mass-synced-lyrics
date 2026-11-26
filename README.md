@@ -137,6 +137,7 @@ Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hi
   - The lines it was sure of get those times and the others interpolate or ripple. Times you set yourself are kept.
   - If fewer lyric words were heard being sung than **Aligned lyrics must match**, it still does this but says *Partly aligned*, so check those lines.
   - Otherwise nothing changes, and a note says why.
+  - The **▾** beside it chooses **Auto-align lines** or **Auto-align lines and words (word-synced)**. The button itself follows the **Synced lyrics** setting. With words, each word gets a time too, and the words move with their line when you edit it.
 - **Clear pins** removes the pins.
 - **⇣ Found → Edited** starts Edited over from the found timing (clears offset, stretch, pins and edited times). **⇣ Aligned → Edited** brings the GPU's whole timing down into Edited, keeping the times you set yourself.
 
@@ -168,6 +169,11 @@ On Windows, sound is played through the default output device. Without an output
 
 Off by default. Switch it on under **Scores and alignment** on the Find lyrics tab.
 - **⚡ Align every song, not only low-confidence ones** (off by default): sends every song with found lyrics to the GPU while finding. **⚡ Align (GPU) → Align all songs in the list** does the same for the songs listed now.
+- **Synced lyrics: To the line / ⚡ To the word** (to the line by default). To the word writes enhanced LRC: every word gets a time (`[00:12.00]<00:12.00>Paper <00:12.50>boats`), for karaoke-style players.
+  - Online lyrics are almost never timed to the word, so the word times come only from the GPU aligner listening to the song. They are less accurate, and there is little to check them against. Words it can't hear clearly are spread out between the ones it can.
+  - Every song with found lyrics is aligned. Songs aligned before are judged again from what the GPU heard, without the GPU.
+  - The first time, a warning explains this. Review every song in the player before saving; saving word-synced songs asks you to confirm and recommends that review.
+  - For particular songs: **right-click → ⚡ Align on the GPU → Lines** or **Lines and words (word-synced)**.
 - **⚡ Keep the GPU models loaded** (on by default): the aligner and its models stay in GPU memory (about 3 GB) between songs and runs, so aligning starts at once. Switched off, they're released after 2 minutes without work.
 - **Requirements:** an NVIDIA graphics card with its driver installed. Without one, the option can't be switched on.
 - **First use:** the app offers to install a one-time add-on into `%LOCALAPPDATA%\mass-synced-lyrics\aligner`. It needs Python 3.10–3.12 from python.org.
@@ -201,10 +207,10 @@ While **Find lyrics** runs, songs whose found lyrics are below **High confidence
 
 If 3 songs in a row fail on their own (unreadable files, say), the same window appears.
 
-To align particular songs regardless of their scores, select them and use **right-click → ⚡ Align on the GPU**. Songs with your own choice are skipped, and the log says so.
+To align particular songs regardless of their scores, select them and use **right-click → ⚡ Align on the GPU → Lines** (or **Lines and words**). Songs with your own choice are skipped, and the log says so.
 
 **Nothing is worked out twice:**
-- A song already aligned on the GPU is skipped, also when you ask for it.
+- A song already aligned on the GPU is skipped, also when you ask for it (unless you ask for it to the word and it was aligned to the line, or the other way round).
 - What the GPU heard is kept per song and set of lyric lines, for as long as the audio file is unchanged. Aligning the same lyrics again (in a batch, from the right-click menu or with Auto-align) reuses it instantly, judged against the current settings.
 - Find skips songs it handled before, and online lookups are reused.
 

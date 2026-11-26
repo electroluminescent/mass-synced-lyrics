@@ -546,6 +546,7 @@ class Outcome:
     line_conf: dict = field(default_factory=dict)    # pin_key(line) -> 0-1 how surely it was heard
     partial: bool = False       # ok, but fewer words heard than the minimum: the lines it was sure of are
     minimum: float = 0.0        # placed, the rest interpolated; not counted as verified (left to check)
+    words: bool = False         # the text is word-synced (enhanced LRC)
 
 
 def _too_little(base: "Outcome", verify: float, minimum: float, what: str) -> bool:
@@ -758,10 +759,98 @@ def _evaluate_heard(text: str, items, result: dict, duration, minimum: float, mo
     return base
 
 
-def evaluate(text: str, result: dict, duration: float | None, minimum: float, mode: str = "slope") -> Outcome:
+def has_word_times(text: str | None) -> bool:
+    return bool(text) and lrcmod.WORD_TS_RE.search(text) is not None
+
+
+def add_word_times(timed: str, items, result: dict, duration: float | None) -> str:
+    """Word-synced lyrics (enhanced LRC: [line time]<word time>word <word time>word …) from the GPU's
+    result, for lyrics already timed line by line (`timed`; `items` are the lines as they were sent).
+    Each word takes the time it was heard being sung (transcript) or, where the forced alignment agrees
+    with the line's start, where it was placed; the line's first word starts with the line, and words
+    in between are shared out by length. Lines with several timestamps (repeats) stay line-synced."""
+    bodies = [b for _, b in items]
+    heard = match_transcript(bodies, result.get("transcript") or []) if result.get("transcript") \
+        else [[] for _ in bodies]
+    forced = map_lines(bodies, result.get("segments") or [])
+    raw = timed.splitlines()
+    entries = []                                      # (time, raw index, stamps, body, stamp count), lyric lines
+    all_starts = []                                   # every timestamped line start (gaps too)
+    for i, line in enumerate(raw):
+        m = lrcmod.LINE_TS_RE.match(line)
+        if not m:
+            continue
+        stamps = [lrcmod._ts_to_seconds(x) for x in lrcmod.TS_RE.finditer(m.group(0))]
+        body = lrcmod.WORD_TS_RE.sub("", line[m.end():]).strip()
+        all_starts += stamps
+        if _WORD_RE.search(body):
+            entries += [(t, i, m.group(0), body, len(stamps)) for t in stamps]
+    entries.sort(key=lambda e: e[0])
+    all_starts.sort()
+    end_of_song = duration if duration else (all_starts[-1] + 8.0 if all_starts else 0.0)
+    for n, (start, i, stamps, body, n_stamps) in enumerate(entries):
+        if n >= len(bodies) or n_stamps != 1 or _tokens(body) != _tokens(bodies[n]):
+            continue
+        words = body.split()
+        if len(words) < 2:
+            raw[i] = f"{stamps}<{lrcmod.format_ts(start)}>{body}"
+            continue
+        nxt = next((t for t in all_starts if t > start + 0.01), end_of_song)
+        stop = max(start + 0.2, min(nxt, end_of_song))
+        tok_word = []                                 # token index in the line -> word index
+        for wi, w in enumerate(words):
+            tok_word += [wi] * len(_tokens(w))
+        known: dict[int, float] = {0: start}
+        for pos, t0, t1, _prob, _sim in heard[n] if n < len(heard) else []:
+            if pos < len(tok_word) and start - 0.3 <= t0 < stop and (t1 - t0) <= MAX_WORD:
+                wi = tok_word[pos]
+                if wi and wi not in known:
+                    known[wi] = t0
+        fw = forced[n] if n < len(forced) else []
+        onset = _onset(fw)
+        if len(fw) == len(words) and onset is not None and abs(onset - start) <= 1.0:
+            for wi, w in enumerate(fw):
+                if wi and wi not in known and w[3] >= 0.3 and start <= w[1] < stop:
+                    known[wi] = w[1]
+        ks, last = [], -1.0                           # keep them in order, inside the line
+        for wi in sorted(known):
+            t = known[wi]
+            if t > last + 0.04 and t < stop - 0.04:
+                ks.append((wi, t))
+                last = t
+        if not ks or ks[0][0] != 0:
+            ks.insert(0, (0, start))
+        times = [None] * len(words)
+        for wi, t in ks:
+            times[wi] = t
+        lens = [max(1, len(w)) for w in words]
+        for (a, ta), (b, tb) in zip(ks, ks[1:] + [(len(words), None)]):
+            if b - a <= 1:
+                continue
+            if tb is None:                            # after the last known word: a sung pace, within the line
+                tb = min(stop, ta + 0.45 * (b - a) + 0.2)
+            span = sum(lens[a:b])
+            acc = 0
+            for wi in range(a + 1, b):
+                acc += lens[wi - 1]
+                times[wi] = ta + (tb - ta) * acc / span
+        raw[i] = stamps + " ".join(f"<{lrcmod.format_ts(t)}>{w}" for t, w in zip(times, words))
+    return "\n".join(raw)
+
+
+def evaluate(text: str, result: dict, duration: float | None, minimum: float, mode: str = "slope",
+             words: bool = False) -> Outcome:
     """Turn the worker's result into re-timed lyrics and a verify score; ok only at or above `minimum`.
     mode: how lines the aligner couldn't place follow the placed ones ("slope" = Interpolate,
-    "ripple" = Ripple changes)."""
+    "ripple" = Ripple changes). words: also time every word (enhanced LRC)."""
+    out = _evaluate(text, result, duration, minimum, mode)
+    if words and out.ok and out.text:
+        out.text = add_word_times(out.text, lyric_lines(text), result, duration)
+        out.words = True
+    return out
+
+
+def _evaluate(text: str, result: dict, duration: float | None, minimum: float, mode: str = "slope") -> Outcome:
     items = lyric_lines(text)
     if len(items) < 2:
         return Outcome(False, 0.0, reason="fewer than 2 timed lines")
@@ -870,12 +959,15 @@ def pick_low_confidence(settings, paths) -> list[str]:
 
 
 def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: bool = False,
-              progress: "SongProgress | None" = None) -> dict:
+              progress: "SongProgress | None" = None, words: bool | None = None) -> dict:
     """Align one song's proposal. Returns an align_progress-style dict (status aligned / rejected /
     error / skipped). Raises AlignerError when the worker itself fails (not this song).
     force=True (asked for this song): align even if its scores are fine, and judge again a song turned
-    down before. A song already aligned on the GPU is skipped (unless Ignore cached results is on)."""
-    kind, ctx = prepare_one(settings, path, st, minimum, force)
+    down before. A song already aligned on the GPU is skipped (unless Ignore cached results is on).
+    words: word-synced lyrics (None = the Synced lyrics setting)."""
+    if words is None:
+        words = bool(getattr(settings, "sync_words", False))
+    kind, ctx = prepare_one(settings, path, st, minimum, force, words)
     if kind == "done":
         return ctx
     if progress is not None:
@@ -884,9 +976,10 @@ def align_one(settings, path: str, al: "Aligner", st, minimum: float, force: boo
     return finish_one(settings, path, st, minimum, ctx, result)
 
 
-def prepare_one(settings, path: str, st, minimum: float, force: bool = False):
+def prepare_one(settings, path: str, st, minimum: float, force: bool = False, words: bool = False):
     """What to align for this song: ("done", event) when nothing needs the GPU (skipped, aligned or
-    judged before), else ("go", context for gpu_one / finish_one)."""
+    judged before), else ("go", context for gpu_one / finish_one). words: word-synced lyrics; a song
+    aligned before line by line (or the other way round) is judged again, from the cached GPU result."""
     from .paths import to_long_path
     from .tags import TagFile
 
@@ -904,6 +997,9 @@ def prepare_one(settings, path: str, st, minimum: float, force: bool = False):
     h = _hash(text)
     fresh = bool(getattr(settings, "ignore_cache", False))
     prev = None if fresh else st.get_aligned(path)
+    if prev is not None and prev[1] and prev[4] and has_word_times(prev[4]) != bool(words):
+        prev, fresh = None, True   # aligned before, but not to the word (or only to the word): judge again,
+        #                            from the found timing and the cached GPU result
     base = text                                                  # the timing the aligner starts from
     if fresh:
         det = st.get_aligned_detail(path) or {}
@@ -933,7 +1029,7 @@ def prepare_one(settings, path: str, st, minimum: float, force: bool = False):
     except Exception:
         dur = None
     return "go", {"ev": ev, "text": text, "base": base, "label": label, "kind": kind, "h": h, "items": items,
-                  "dur": dur}
+                  "dur": dur, "words": bool(words)}
 
 
 def gpu_one(settings, st, al, ctx: dict, progress: "SongProgress | None" = None) -> dict:
@@ -953,7 +1049,7 @@ def finish_one(settings, path: str, st, minimum: float, ctx: dict, result: dict)
     if dur is None and result.get("duration"):
         dur = float(result["duration"])
     mode = "ripple" if getattr(settings, "ripple", False) else "slope"
-    out = evaluate(base, result, dur, minimum, mode)
+    out = evaluate(base, result, dur, minimum, mode, **({"words": True} if ctx.get("words") else {}))
     if not out.ok:
         if result.get("ok"):                     # a judgement about these lyrics: remember it
             st.set_aligned(path, h, False, out.verify, out.reason, kind=kind, orig=base, heard=out.heard,
@@ -973,6 +1069,8 @@ def finish_one(settings, path: str, st, minimum: float, ctx: dict, result: dict)
         conf = round(max(old_conf or 0.0, out.verify), 1)
         new_label = f"{label} · aligned ({out.verify:.0f}% heard)"
         note = ""
+    if out.words:
+        new_label += " · word-synced"
     shift = mismatch(base, out.text)
     if not st.use_aligned(path, kind, text, out.text, new_label, conf, new_fit, base=base):
         return dict(ev, reason="changed or saved meanwhile")
@@ -1089,7 +1187,8 @@ class AlignService:
         self._streak = 0
 
     # -- control (any thread)
-    def submit(self, paths, force: bool = False) -> int:
+    def submit(self, paths, force: bool = False, words: bool | None = None) -> int:
+        """Queue songs. words: word-synced lyrics (None = the Synced lyrics setting when it runs)."""
         from .paths import state_key
         n = 0
         with self._cv:
@@ -1098,9 +1197,13 @@ class AlignService:
             for p in paths:
                 k = state_key(p)
                 if k in self._queued:
+                    if words is not None or force:       # asked again: the newest choice counts
+                        for i, it in enumerate(self._q):
+                            if it[0] == "song" and it[1] == k:
+                                self._q[i] = ("song", k, it[2] or force, it[3] if words is None else words)
                     continue
                 self._queued.add(k)
-                self._q.append(("song", k, force))
+                self._q.append(("song", k, force, words))
                 n += 1
             self._cv.notify_all()
         if n:
@@ -1230,14 +1333,16 @@ class AlignService:
                         self._done_progress(prog, learn=not result.get("cached"), result=result)
                         self._emit({"type": "align_raw", "token": token, "path": path, "result": result})
                         continue
-                    _, path, force = item
+                    _, path, force, words = item
+                    if words is None:
+                        words = bool(getattr(s, "sync_words", False))
                     if st is None:
                         st = State(s.resolved_state_db())
-                    if not force:
+                    if not force and not words:             # to the word: every song
                         c, f = st.pending_scores().get(path, (None, None))
                         if not is_low_confidence(s, c, f):
                             continue
-                    kind, ctx = prepare_one(s, path, st, float(getattr(s, "ai_align_min", 70)), force)
+                    kind, ctx = prepare_one(s, path, st, float(getattr(s, "ai_align_min", 70)), force, words)
                     if kind == "done":                      # nothing for the GPU: report it right away
                         self._finished(ctx, path)
                         continue

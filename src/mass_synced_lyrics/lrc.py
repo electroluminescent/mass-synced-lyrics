@@ -326,6 +326,64 @@ def retime(text: str, offset: float = 0.0, factor: float = 1.0, pins: dict | Non
     return "\n".join(out)
 
 
+def _timed_rows(text: str):
+    """Lyric lines with their times: [(time, raw index, stamp prefix, body without word tags, stamp count,
+    raw body)] in time order (a line with several timestamps appears once per time), and every line
+    start (blank lines too), sorted."""
+    rows, starts = [], []
+    for i, line in enumerate((text or "").splitlines()):
+        m = LINE_TS_RE.match(line)
+        if not m:
+            continue
+        stamps = [_ts_to_seconds(x) for x in TS_RE.finditer(m.group(0))]
+        raw = line[m.end():]
+        body = WORD_TS_RE.sub("", raw).strip()
+        starts += stamps
+        if body:
+            rows += [(t, i, m.group(0), body, len(stamps), raw) for t in stamps]
+    rows.sort(key=lambda r: r[0])
+    starts.sort()
+    return rows, starts
+
+
+def carry_word_times(text: str, worded: str | None) -> str:
+    """Give `text` (lyrics timed line by line) the word times of `worded` (the same lyrics, word-synced,
+    perhaps timed differently): each line's words keep their offsets from the line start, squeezed to
+    end before the next line when the line now has less room. Lines that differ are left as they are."""
+    if not text or not worded or not WORD_TS_RE.search(worded):
+        return text
+    src, _ = _timed_rows(worded)
+    dst, starts = _timed_rows(text)
+    if len(src) != len(dst):
+        return text
+    lines = text.splitlines()
+    norm = lambda b: " ".join(b.split()).lower()
+    for (t0, _, _, sbody, _, sraw), (t, i, stamp, body, n, raw) in zip(src, dst):
+        if n != 1 or WORD_TS_RE.search(raw) or norm(sbody) != norm(body) or not WORD_TS_RE.search(sraw):
+            continue
+        parts = re.split(r"(<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>)", sraw.strip())
+        words, cur = [], None                          # [(offset, text)]
+        for part in parts:
+            m = WORD_TS_RE.fullmatch(part)
+            if m:
+                cur = _ts_to_seconds(m) - t0
+            elif part.strip() or (part and words):
+                if cur is None:
+                    cur = 0.0
+                words.append((max(0.0, cur), part))
+                cur = None
+        if not words:
+            continue
+        nxt = next((x for x in starts if x > t + 0.01), None)
+        last = words[-1][0]
+        scale = 1.0
+        if nxt is not None and last > 0 and t + last > nxt - 0.05:
+            scale = max(0.0, (nxt - 0.05 - t)) / last
+        lines[i] = stamp + "".join(f"<{format_ts(t + off * scale)}>{w}" for off, w in words)
+    out = "\n".join(lines)
+    return out + ("\n" if text.endswith("\n") else "")
+
+
 def solve_alignment(anchors: list[tuple[float, float]], factor: float = 1.0) -> tuple[float, float]:
     """(offset, factor) mapping original line times onto target times.
     One anchor keeps the given factor and solves the offset; two or more fit a
