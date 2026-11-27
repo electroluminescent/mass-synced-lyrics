@@ -17,8 +17,6 @@ dependencies = [
     "Send2Trash>=1.8",
     "av>=12",
     "numpy>=1.24",
-    "sounddevice>=0.4.6",
-    "sv-ttk>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +27,7 @@ build = ["pyinstaller"]
 mass-synced-lyrics = "mass_synced_lyrics.cli:main"
 
 [project.gui-scripts]
-mass-synced-lyrics-gui = "mass_synced_lyrics.gui:main"
+mass-synced-lyrics-backend = "mass_synced_lyrics.server:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "mass_synced_lyrics.__version__" }

@@ -19,6 +19,10 @@ for raw in sys.stdin:
             with open(log, "a", encoding="utf-8") as fh:
                 fh.write(req["prefetch"] + "\n")
         continue
+    if req.get("vocals_out") and os.environ.get("FAKE_VOCALS"):      # the isolated vocals, for the player
+        import shutil
+        os.makedirs(os.path.dirname(req["vocals_out"]), exist_ok=True)
+        shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "silence.ogg"), req["vocals_out"] + ".ogg")
     crash = os.environ.get("FAKE_CRASH_ONCE")
     if crash and not os.path.exists(crash):
         open(crash, "w").close()

@@ -1,0 +1,60 @@
+{
+  "name": "mass-synced-lyrics",
+  "productName": "Mass Synced Lyrics",
+  "version": "2.0.0",
+  "description": "Find, review and apply time-synced lyrics for a music library.",
+  "main": "main.js",
+  "author": "electroluminescent",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/listmodel.test.js",
+    "e2e": "node --test test/e2e.test.js",
+    "dist": "electron-builder --win nsis portable --publish never"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.12",
+    "playwright-core": "^1.56.0"
+  },
+  "build": {
+    "appId": "com.electroluminescent.masssyncedlyrics",
+    "productName": "Mass Synced Lyrics",
+    "artifactName": "MassSyncedLyrics-${version}-${arch}-${target}.${ext}",
+    "directories": {
+      "output": "../dist/electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "backend.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/msl-backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "icon": "build/icon.ico",
+      "target": ["nsis", "portable"],
+      "executableName": "MassSyncedLyrics"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "MassSyncedLyrics-Setup-${version}.${ext}",
+      "shortcutName": "Mass Synced Lyrics"
+    },
+    "portable": {
+      "artifactName": "MassSyncedLyrics-${version}-portable.${ext}"
+    }
+  }
+}

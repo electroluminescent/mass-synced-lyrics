@@ -21,15 +21,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: python -m pip install -r requirements.txt pytest
-      - name: Test (Linux, GUI under Xvfb)
-        if: runner.os == 'Linux'
+      - name: Backend tests
+        run: python -m pytest -q
+      - name: Window tests
+        working-directory: desktop
         run: |
-          sudo apt-get update && sudo apt-get install -y xvfb python3-tk
-          xvfb-run -a python -m pytest -q
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
-        run: python -m pytest -q -k "not gui"
+          npm ci --no-audit --no-fund
+          npm test
+      - name: End-to-end (real window, Linux)
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        env:
+          MSL_PYTHON: python
+          MSL_SHOTS: "0"
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb
+          xvfb-run -a -s "-screen 0 1600x1000x24" node --test test/e2e.test.js
 
   windows-app:
     needs: test
@@ -39,6 +50,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Write build info
         env:
           ACOUSTID_API_KEY: ${{ secrets.ACOUSTID_API_KEY }}
@@ -49,10 +63,16 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MassSyncedLyrics-windows
-          path: dist/MassSyncedLyrics-*-windows.zip
+          path: |
+            dist/MassSyncedLyrics-*-windows.zip
+            dist/electron/MassSyncedLyrics-Setup-*.exe
+            dist/electron/MassSyncedLyrics-*-portable.exe
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MassSyncedLyrics-*-windows.zip
+          files: |
+            dist/MassSyncedLyrics-*-windows.zip
+            dist/electron/MassSyncedLyrics-Setup-*.exe
+            dist/electron/MassSyncedLyrics-*-portable.exe
           generate_release_notes: true

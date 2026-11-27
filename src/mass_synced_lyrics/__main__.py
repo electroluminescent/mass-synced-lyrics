@@ -2,11 +2,12 @@ import sys
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        from .cli import main as cli_main
-        sys.exit(cli_main())
-    from .gui import main as gui_main
-    gui_main()
+    if sys.argv[1:2] == ["--backend"]:          # the desktop app's backend (started by the window)
+        from .server import main as server_main
+        server_main()
+        return
+    from .cli import main as cli_main
+    sys.exit(cli_main())
 
 
 if __name__ == "__main__":

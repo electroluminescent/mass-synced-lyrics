@@ -12,3 +12,8 @@ src/mass_synced_lyrics/_buildinfo.py
 /MassSyncedLyrics.exe
 # local test data (may hold lyrics); never committed
 .sync/
+# the window (Electron)
+desktop/node_modules/
+desktop/test/shots/
+# the window's icons for electron-builder
+!desktop/build/

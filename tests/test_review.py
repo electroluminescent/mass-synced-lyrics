@@ -9,7 +9,7 @@ PLAIN_K = PLAIN
 from mass_synced_lyrics import lrc, review
 from mass_synced_lyrics.applier import apply_all, plan
 from mass_synced_lyrics.engine import Engine
-from mass_synced_lyrics.player import Player, compute_peaks, decode, envelope
+from mass_synced_lyrics.player import compute_peaks, decode, envelope, volume_gain
 from mass_synced_lyrics.state import State
 from mass_synced_lyrics.tags import TagFile
 
@@ -54,21 +54,9 @@ def test_decode_peaks_envelope():
     assert zoom.max() == 1.0
 
 
-def test_player_silent_clock():
-    pl = Player()
-    s = np.zeros((44100 * 3, 2), dtype=np.int16)
-    from mass_synced_lyrics.player import AudioData
-    pl.load(AudioData(s, 44100, compute_peaks(s, 44100)))
-    pl.silent_reason = "test"           # force the clock fallback
-    pl.seek(1.0)
-    pl.play()
-    import time
-    time.sleep(0.15)
-    assert 1.1 <= pl.position() < 1.6
-    pl.pause()
-    p = pl.position()
-    time.sleep(0.05)
-    assert pl.position() == p
+def test_volume_is_logarithmic():
+    assert volume_gain(100) == 1.0 and volume_gain(0) == 0.0
+    assert volume_gain(50) == pytest.approx(0.1) and volume_gain(75) == pytest.approx(10 ** (-0.5))
 
 
 def test_gather_candidates_and_apply_pins(settings):
@@ -207,21 +195,6 @@ def test_choose_remove_in_lrc_mode_deletes_lrc(settings):
     review.choose(a, rm.text, rm.label, settings)
     assert apply_all(settings, [a])["counts"] == {"lrc_written": 1}
     assert not os.path.exists(out)
-
-
-def test_player_volume_in_callback():
-    s = np.full((2048, 2), 10000, dtype=np.int16)
-    from mass_synced_lyrics.player import AudioData
-    pl = Player()
-    pl.load(AudioData(s, 44100, compute_peaks(s, 44100)))
-    pl._playing = True
-    out = np.zeros((1024, 2), dtype=np.int16)
-    pl.volume = 0.5
-    pl._callback(out, 1024, None, None)
-    assert out[0, 0] == 5000
-    pl.volume = 0.0
-    pl._callback(out, 1024, None, None)
-    assert not out.any()
 
 
 def test_restore_originals_embed_and_lrc(settings):
@@ -379,7 +352,7 @@ def test_apply_confident_plan_and_confidences_reach_the_list(settings):
 
 
 def test_resize_rules():
-    from mass_synced_lyrics.review_ui import resize_lyric
+    from mass_synced_lyrics.review_session import resize_lyric
     # rows: lyric 10, lyric 14 (butted), gap 17, lyric 20, lyric 24
     times = [10.0, 14.0, 17.0, 20.0, 24.0]
     texts = ["a", "b", "", "c", "d"]
@@ -406,7 +379,7 @@ def test_resize_rules():
 
 
 def test_old_alignments_become_visible_edits():
-    from mass_synced_lyrics.review_ui import _diff_as_edits
+    from mass_synced_lyrics.review_session import _diff_as_edits
     orig = "[00:01.00]a\n[00:05.00]b\n[00:09.00]c\n"
     aligned = "[00:01.50]a\n[00:04.00]\n[00:05.00]b\n[00:10.00]c\n"
     d = _diff_as_edits(orig, aligned)
@@ -414,7 +387,7 @@ def test_old_alignments_become_visible_edits():
 
 
 def test_moving_a_lyric_stretches_the_attached_ones_up_to_the_gap():
-    from mass_synced_lyrics.review_ui import move_lyrics
+    from mass_synced_lyrics.review_session import move_lyrics
     # rows: a 10, b 14, c 17 (attached), gap 20, d 24
     times = [10.0, 14.0, 17.0, 20.0, 24.0]
     texts = ["a", "b", "c", "", "d"]

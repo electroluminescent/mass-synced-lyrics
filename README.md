@@ -1,12 +1,12 @@
 # Mass Synced Lyrics
 
-Walks a music folder and adds **time-synced (LRC) lyrics** to each song. It has a desktop interface with a review player, plus a command line.
+Walks a music folder and adds **time-synced (LRC) lyrics** to each song. It has a desktop app with a review player, plus a command line.
 
-The interface is a modern light/dark theme; switch with **Dark mode** in the header. Hover over any button, switch or field for a short explanation.
+The desktop app is an Electron window (drawing and playback on the GPU, smooth at 60 fps even with tens of thousands of songs listed) with a Python engine behind it that finds, aligns and writes the lyrics. Light and dark themes: switch with **Dark mode** in the header. Hover over any button, switch or field for a short explanation.
 
 The app works in three steps:
 
-1. **Find lyrics** (Run tab). The app scans the folder and finds lyrics. **Nothing is written yet.**
+1. **Find lyrics** (Find lyrics tab). The app scans the folder and finds lyrics. **Nothing is written yet.**
 2. **Review** (optional, Review & player tab). Listen, compare old and new lyrics, re-time them, and make per-file choices.
 3. **Apply** (the bar fixed to the bottom of both tabs, which appears once files are loaded). Choose the final action:
    - **Overwrite files (embed lyrics)**, the default, writes the lyrics into each audio file's tags.
@@ -106,6 +106,7 @@ Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hi
   - **`** (or **~**) plays the next checkpoint in the song after the needle, then wraps round to the first.
   - Each plays ± the checkpoint length (default 1.0 s), then stops, or repeats if *Loop* is ticked.
   - Defaults are the start of the first and of the last lyric. Your own checkpoints are saved per song; *Reset points* restores the defaults.
+- **Mix / 🎤 Vocals:** play the song as it is, or only its vocals: easier to hear where each line and word starts. The vocals are the ones the GPU aligner isolated (Demucs), kept for the player (Opus, about 3 MB per song, in `%LOCALAPPDATA%\mass-synced-lyrics\vocals`), so the switch is available for songs aligned on the GPU from 2.0.0 on. The timing is the same as the song's. *Clear cached data* removes them.
 - **Volume slider** next to the play button, on a logarithmic (decibel) scale so most of its travel covers the quieter range. Click the **%** to type a level, or use the mouse wheel over the slider. **Space** plays and pauses. Number keys and Space work unless you are typing in an editable box.
 
 **Lyrics panes:** current lyrics on the left, a choice of new lyrics on the right: what Find found, sidecars, collection matches, LRCLIB (cached or *Search LRCLIB*), the current lyrics (to re-time them), the original lyrics, or *No lyrics*. The panes scroll together, keep the playing line centred, and animate smoothly. Click a line to jump to it.
@@ -113,6 +114,14 @@ Click the **Match** or **Fit** header for two sliders, both in 5 % steps. One hi
 - **What to write**, under the Edited pane: **Keep current**, **Use found** (with its Match %), **⚡ Use aligned** (with the % of words the GPU heard) or **✎ Use edited**. The one Apply will use is **green with a ✓**. By default it's the most worked-on level: Edited once you change something there (it becomes the choice by itself, a moment after you stop), else Aligned if the song was aligned, else Found.
 - *Reset to default* removes your choice for the song.
 - **Right-click a line** in the Edited pane to **insert a line before / after** it or **delete** it. This changes only the Edited lyrics; Found keeps the lines as found.
+
+**Word timing** (word-synced lyrics): in the scrolling waveform, each word of an Edited line is marked with a small white handle at its start.
+
+- **Drag a word mark** to move where that word starts. It stays between the words around it and inside its line; the words you placed are marked yellow, and a line with word times of yours shows *·w* in the Edited pane.
+- Words move with their line when the line is moved, stretched or re-timed.
+- **Right-click a line** (in the Edited pane or the Edited timeline) → **Time this line's words** gives every word a time of its own, shared out by length over the line, to adjust from there. This also works for lyrics that were never word-synced. **Clear my word times on this line** goes back to the aligner's word times (or none).
+- **Shift+click the target button** above the needle (or right-click the Edited timeline → *Next word starts at the needle*): the next word in the line being sung starts at the needle. Play, pause where a word starts, press it.
+- Your word times are kept with the song and written by **✎ Use edited**.
 
 **The lyric panes:** the song's **Current** lyrics are collapsed by default; **▸ Current** shows them beside the Edited ones and **◂ Hide** collapses them again (remembered).
 
@@ -252,22 +261,23 @@ The LRC text, timestamps included, goes into the normal lyrics field. That is wh
 
 ## Using it
 
-**Windows (no install needed):**
+**Windows:**
 
-1. Unzip `MassSyncedLyrics-<version>-windows.zip` anywhere, for example to your Desktop.
-2. Double-click **`MassSyncedLyrics.exe`**.
-3. Choose your music folder and press **Find lyrics**. Nothing is changed until you press **Apply** in the bar at the bottom.
+- **Installer:** run `MassSyncedLyrics-Setup-<version>.exe`. It installs for your user only (no admin rights) with a Start menu shortcut, and starts fastest.
+- **Portable:** `MassSyncedLyrics-<version>-portable.exe` runs without installing. It unpacks itself on every start, so it takes a few seconds longer to open.
 
-The app isn't code-signed, so the first launch may show *Windows protected your PC*. Click **More info → Run anyway**. Starting it takes a few seconds because the single-file app unpacks itself first.
+Choose your music folder and press **Find lyrics**. Nothing is changed until you press **Apply** in the bar at the bottom.
+
+The app isn't code-signed, so the first launch may show *Windows protected your PC*. Click **More info → Run anyway**. Settings, sessions, your choices and edits carry over from 1.x.
 
 `mass-synced-lyrics-cli.exe` is the same engine for scripts and scheduled tasks, for example `mass-synced-lyrics-cli.exe "D:\Music" --dry-run`.
 
-**From source** (Python 3.10+):
+**From source** (Python 3.10+, Node.js 20+):
 
 ```
 pip install .
-mass-synced-lyrics-gui                 # desktop interface
-mass-synced-lyrics "D:\Music" --dry-run
+cd desktop && npm install && npm start   # desktop app (runs the Python engine from ../src)
+mass-synced-lyrics "D:\Music" --dry-run  # command line
 ```
 
 Command line options: `--output embed|lrc`, `--lookup-synced` (also look up files that already have synced lyrics embedded), `--trim`, `--straighten`, `--collection PATH` (repeatable), `--offline`, `--dry-run` (find only; the app's Apply button can write the results later), `--lrc-action recycle|delete|keep`, `--no-restore-mtime`, `--threshold 90`, `--no-acoustid`, `--acoustid-key KEY`, `--fpcalc PATH`, `--retry-misses`, `--rpm 80`, `--workers 6`, `--log-dir DIR`, `--state-db FILE`.
@@ -289,10 +299,13 @@ GPU alignment runs alongside Find, one song at a time on the GPU (the GPU is the
 ## Building
 
 ```
-.\build.ps1          # Windows: runs tests, downloads fpcalc, builds both .exe files and the zip
+.\build.ps1          # Windows: runs the tests, downloads fpcalc, builds the engine (PyInstaller) and the
+                     # window (electron-builder): installer, portable .exe, command-line tool and the zip
 ```
 
-GitHub Actions (`.github/workflows/build.yml`) does the same on every push. Pushing a tag such as `v1.0.3` publishes a Release with the zip attached. See `PUBLISHING.md` for the one-time GitHub setup. Set the repository secret **`ACOUSTID_API_KEY`** to build a default AcoustID key into the app. Locally, `python scripts/write_buildinfo.py --key YOURKEY` does the same. The key is never committed.
+GitHub Actions (`.github/workflows/build.yml`) does the same on every push. Pushing a tag such as `v2.0.0` publishes a Release with the installer, the portable app and the zip attached.
+
+Tests: `python -m pytest` (the engine, no window needed), `npm test` in `desktop` (the song list), and `node --test test/e2e.test.js` in `desktop` (the real window, driven like a person would; set `MSL_PYTHON` to the Python to use). See `PUBLISHING.md` for the one-time GitHub setup. Set the repository secret **`ACOUSTID_API_KEY`** to build a default AcoustID key into the app. Locally, `python scripts/write_buildinfo.py --key YOURKEY` does the same. The key is never committed.
 
 ## Limitations
 

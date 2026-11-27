@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:">
+  <title>Mass Synced Lyrics</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="header">
+    <img src="icon.png" alt="">
+    <div>
+      <div class="title">Mass Synced Lyrics</div>
+      <div class="muted" id="subtitle">Find, review and apply time-synced lyrics</div>
+    </div>
+    <div id="activity"></div>
+    <label class="switch" id="dark-switch" style="margin-left: 18px"><input type="checkbox" id="dark"> Dark mode</label>
+  </div>
+  <div id="tabs">
+    <button id="tab-find" class="sel">Find lyrics</button>
+    <button id="tab-review">Review &amp; player</button>
+  </div>
+  <div class="page" id="find"></div>
+  <div class="page hidden" id="review"></div>
+  <div class="card hidden" id="applybar"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

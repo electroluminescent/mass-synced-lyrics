@@ -12,9 +12,7 @@ The Windows build bundles the following software. Each remains under its own lic
 | Send2Trash | BSD-3-Clause | https://github.com/arsenetar/send2trash |
 | PyAV (with bundled FFmpeg libraries) | BSD-3-Clause; FFmpeg LGPL-2.1-or-later | https://github.com/PyAV-Org/PyAV |
 | NumPy | BSD-3-Clause | https://numpy.org |
-| python-sounddevice (with PortAudio) | MIT | https://github.com/spatialaudio/python-sounddevice |
-| Sun Valley ttk theme (sv-ttk) | MIT | https://github.com/rdbende/Sun-Valley-ttk-theme |
-| Tcl/Tk (tkinter) | Tcl/Tk license (BSD-style) | https://www.tcl.tk |
+| Electron (with Chromium and Node.js; their licenses ship with the app as LICENSES.chromium.html) | MIT | https://www.electronjs.org |
 | fpcalc (Chromaprint) | LGPL-2.1-or-later; static build includes FFmpeg (LGPL) | https://github.com/acoustid/chromaprint |
 | PyInstaller bootloader | GPL-2.0 with bootloader exception | https://pyinstaller.org |
 

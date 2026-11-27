@@ -796,3 +796,21 @@ def test_service_tells_once_when_the_gpu_crawls(settings, monkeypatch, tmp_path)
     svc._check_speed({"separate": 150.0}, 222, vram)
     msgs = [e["message"] for e in events if e["type"] == "align_slow"]
     assert len(msgs) == 1 and "3.2 GB" in msgs[0] and "Sysmem Fallback" in msgs[0]
+
+
+def test_worker_saves_the_isolated_vocals_for_the_player(tmp_path):
+    import numpy as np
+
+    from mass_synced_lyrics import aligner_worker
+    from mass_synced_lyrics.player import decode
+
+    w = aligner_worker.Worker.__new__(aligner_worker.Worker)
+    w._savers = []
+    arr = (np.sin(np.linspace(0, 2000, 44100 * 3)) * 0.3).astype(np.float32)
+    base = str(tmp_path / "vocals" / "abc")
+    w._save_vocals(np.stack([arr, arr]), 44100, base)
+    for t in w._savers:
+        t.join(10)
+    out = base + ".ogg" if os.path.exists(base + ".ogg") else base + ".flac"
+    assert os.path.exists(out) and not os.path.exists(out + ".part")
+    assert decode(out).duration == pytest.approx(3.0, abs=0.05)

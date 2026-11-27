@@ -384,6 +384,74 @@ def carry_word_times(text: str, worded: str | None) -> str:
     return out + ("\n" if text.endswith("\n") else "")
 
 
+def line_words(raw_body: str) -> list[tuple[float | None, str]]:
+    """A line's words (split on spaces) with their word times where it has them."""
+    out: list[tuple[float | None, str]] = []
+    parts = re.split(r"(<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>)", raw_body)
+    cur = None
+    for part in parts:
+        m = WORD_TS_RE.fullmatch(part)
+        if m:
+            cur = _ts_to_seconds(m)
+            continue
+        for w in part.split():
+            out.append((cur, w))
+            cur = None
+    return out
+
+
+def apply_word_offsets(text: str, marks: dict, duration: float | None = None) -> str:
+    """Set word times you chose yourself. marks: {pin_key(line start): {word index: seconds after the line
+    start}}. The other words of such a line keep their word times, or are shared out by length between
+    the ones that are known; times stay in order and inside the line."""
+    if not text or not marks:
+        return text
+    rows, starts = _timed_rows(text)
+    lines = text.splitlines()
+    end_of_song = duration if duration else (starts[-1] + 8.0 if starts else 0.0)
+    for t, i, stamp, body, n, raw in rows:
+        mk = marks.get(pin_key(t))
+        if not mk or n != 1:
+            continue
+        words = line_words(raw)
+        if not words:
+            continue
+        nxt = next((x for x in starts if x > t + 0.01), end_of_song)
+        stop = max(t + 0.2, nxt if nxt > t else t + 5.0)
+        known: dict[int, float] = {0: t}
+        for j, (wt, _) in enumerate(words):
+            if wt is not None and j:
+                known[j] = wt
+        for j, off in mk.items():
+            j = int(j)
+            if 0 <= j < len(words):
+                known[j] = t + float(off)
+        ks, last = [], t - 1e-9
+        for j in sorted(known):
+            v = min(max(known[j], t), stop - 0.05)
+            if j == 0:
+                v = known[0] if known[0] >= t else t
+            if v > last + 0.02 or j == 0:
+                ks.append((j, v))
+                last = v
+        times: list[float] = [0.0] * len(words)
+        lens = [max(1, len(w)) for _, w in words]
+        for (a, ta), (b, tb) in zip(ks, ks[1:] + [(len(words), None)]):
+            times[a] = ta
+            if b - a <= 1:
+                continue
+            if tb is None:
+                tb = min(stop, ta + 0.45 * (b - a) + 0.2)
+            span = sum(lens[a:b])
+            acc = 0
+            for j in range(a + 1, b):
+                acc += lens[j - 1]
+                times[j] = ta + (tb - ta) * acc / span
+        lines[i] = stamp + " ".join(f"<{format_ts(x)}>{w}" for x, (_, w) in zip(times, words))
+    out = "\n".join(lines)
+    return out + ("\n" if text.endswith("\n") else "")
+
+
 def solve_alignment(anchors: list[tuple[float, float]], factor: float = 1.0) -> tuple[float, float]:
     """(offset, factor) mapping original line times onto target times.
     One anchor keeps the given factor and solves the offset; two or more fit a

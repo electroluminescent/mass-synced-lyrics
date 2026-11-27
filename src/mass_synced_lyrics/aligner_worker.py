@@ -69,6 +69,8 @@ class Worker:
         self._whisper = None
         self._demucs = None
         self._req = None                  # id of the request being worked on (for progress messages)
+        self._vocals_out = None           # where to keep the isolated vocals (no extension), if anywhere
+        self._savers: list = []
         self._pre: dict = {}              # audio path -> (thread, [decoded mix or error]) read ahead
         self._sep_len = 0
         self._on_gpu: str | None = None   # which model is on the GPU now: "demucs" or "whisper"
@@ -158,12 +160,54 @@ class Worker:
                 out = _apply(model, ((mix - mean) / std)[None].to(self.device), self.device, self._demucs_cb)
             voc = out[0, model.sources.index("vocals")] * std + mean
             mono, rate = voc.mean(0).cpu(), model.samplerate
+            if self._vocals_out:                  # a copy for the player's Vocals switch, saved alongside
+                self._save_vocals(voc.cpu().numpy(), rate, self._vocals_out)
         else:
             self.stage("decode")
             mix = self._decoded(path, 44100)
             self.duration = mix.shape[-1] / 44100
             mono, rate = mix.mean(0), 44100
         return julius.resample_frac(mono, rate, SR_WHISPER).numpy().astype("float32")
+
+    def _save_vocals(self, arr, rate: int, base: str) -> None:
+        """Save the isolated vocals (Opus, or FLAC where Opus isn't available) on a helper thread, so the
+        speech model doesn't wait for it."""
+        import threading
+
+        def work():
+            import av
+            import numpy as np
+
+            data = np.ascontiguousarray(np.clip(arr, -1.0, 1.0).astype(np.float32))
+            if data.ndim == 1:
+                data = np.stack([data, data])
+            os.makedirs(os.path.dirname(base), exist_ok=True)
+            for codec, ext, fmt, out_rate in (("libopus", ".ogg", "ogg", 48000), ("flac", ".flac", "flac", rate)):
+                out = base + ext
+                tmp = out + ".part"
+                try:
+                    with av.open(tmp, "w", format=fmt) as c:
+                        st = c.add_stream(codec, rate=out_rate, layout="stereo")
+                        if codec == "libopus":
+                            st.bit_rate = 96000
+                        for i in range(0, data.shape[1], rate):
+                            fr = av.AudioFrame.from_ndarray(np.ascontiguousarray(data[:, i:i + rate]), format="fltp",
+                                                            layout="stereo")
+                            fr.sample_rate = rate
+                            for pk in st.encode(fr):
+                                c.mux(pk)
+                        for pk in st.encode(None):
+                            c.mux(pk)
+                    os.replace(tmp, out)
+                    return
+                except Exception:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+        t = threading.Thread(target=work, daemon=False)
+        t.start()
+        self._savers.append(t)
 
     def prefetch(self, path: str) -> None:
         """Decode the next song while the GPU works on this one (decoding is CPU and disk/network work)."""
@@ -253,6 +297,8 @@ class Worker:
         if len(lines) < 2:
             return {"ok": False, "error": "fewer than 2 lyric lines"}
         self._req, self.timings, self.duration = req.get("id"), {}, 0.0
+        self._vocals_out = req.get("vocals_out") or None
+        self._savers = [t for t in self._savers if t.is_alive()]
         vram = self._vram_start()
         try:
             try:

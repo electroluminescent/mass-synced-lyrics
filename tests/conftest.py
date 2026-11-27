@@ -107,17 +107,83 @@ def settings(tmp_path):
     return s
 
 
-def new_app(settings=None):
-    """gui.App(), retrying Tk start-up: on Windows, creating many Tk interpreters in one test
-    process occasionally fails to read Tk's own library files (not an app problem)."""
-    import time
-    import tkinter
+class FakeServer:
+    """Stands in for the window's connection: collects the events the backend sends."""
 
-    from mass_synced_lyrics import gui
-    for attempt in range(4):
-        try:
-            return gui.App(settings)
-        except tkinter.TclError:
-            if attempt == 3:
-                raise
-            time.sleep(0.5)
+    def __init__(self):
+        from mass_synced_lyrics.server import Loop
+
+        self.loop = Loop()
+        self.events = []
+
+    def event(self, name, data=None):
+        self.events.append((name, data))
+
+
+class BackendHarness:
+    """The app's backend in this process, driven like the window drives it."""
+
+    def __init__(self, settings=None):
+        from mass_synced_lyrics.controller import Backend
+
+        self.server = FakeServer()
+        self.app = Backend(self.server, settings)
+        self.loop = self.server.loop
+        self.rv = self.app.review
+
+    def call(self, method, **params):
+        fn = self.app.rpc(method)
+        assert fn is not None, method
+        out = fn(**params)
+        self.settle()
+        return out
+
+    def rv_call(self, name, *args):
+        return self.call("rv.call", name=name, args=list(args))
+
+    def settle(self, seconds=0.0):
+        """Handle everything due now (and for `seconds` more)."""
+        import time
+
+        end = time.monotonic() + seconds
+        while True:
+            self.loop.run_once(timeout=0.01)
+            if time.monotonic() >= end:
+                for _ in range(3):
+                    self.loop.run_once()
+                return
+
+    def pump(self, cond, timeout=15.0):
+        import time
+
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.loop.run_once(timeout=0.02)
+            if cond():
+                return True
+        return False
+
+    def events(self, name):
+        return [d for n, d in self.server.events if n == name]
+
+    def last(self, name):
+        ev = self.events(name)
+        return ev[-1] if ev else None
+
+    def log_text(self):
+        self.settle(0.06)
+        return "\n".join(line for d in self.events("log") for line in d.get("lines", []))
+
+    def open_song(self, path):
+        self.call("rv.load", path=path)
+        tok = self.rv._token
+        assert self.pump(lambda: self.rv._loaded_token == tok and self.rv.song is not None)
+        self.settle()
+        return self.rv
+
+    def close(self):
+        self.app.shutdown()
+
+
+def new_backend(settings=None):
+    return BackendHarness(settings)

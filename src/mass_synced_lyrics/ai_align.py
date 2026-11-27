@@ -63,6 +63,41 @@ def addon_python() -> str:
     return os.path.join(d, "Scripts", "python.exe") if os.name == "nt" else os.path.join(d, "bin", "python")
 
 
+VOCAL_EXTS = (".ogg", ".flac")
+
+
+def vocals_dir() -> str:
+    """The isolated vocals the GPU aligner keeps for the player's Vocals switch."""
+    return os.path.join(os.path.dirname(addon_dir()), "vocals")
+
+
+def vocals_base(path: str) -> str:
+    """Where this song's vocals go (no extension): named by the file and its size and date, so a changed
+    file isn't played with old vocals."""
+    import hashlib
+
+    from .paths import state_key
+    key = f"{state_key(path)}|{file_sig(path)}".encode("utf-8", "replace")
+    return os.path.join(vocals_dir(), hashlib.sha1(key).hexdigest()[:24])
+
+
+def find_vocals(path: str) -> str:
+    base = vocals_base(path)
+    return next((base + e for e in VOCAL_EXTS if os.path.exists(base + e)), "")
+
+
+def forget_vocals(path: str) -> bool:
+    gone = False
+    base = vocals_base(path)
+    for e in VOCAL_EXTS:
+        try:
+            os.remove(base + e)
+            gone = True
+        except OSError:
+            pass
+    return gone
+
+
 def worker_source() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "aligner_worker.py")
 
@@ -310,6 +345,8 @@ class Aligner:
         self._id += 1
         req = {"id": self._id, "audio": display_path(audio_path), "lines": lines, "probe": probe,
                "language": language}
+        if not os.environ.get("MSL_NO_VOCALS") and not find_vocals(audio_path):
+            req["vocals_out"] = vocals_base(audio_path)          # kept for the player's Vocals switch
         try:
             self._p.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")      # type: ignore[union-attr]
             self._p.stdin.flush()                                              # type: ignore[union-attr]

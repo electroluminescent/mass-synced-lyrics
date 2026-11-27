@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.0
+- **A new desktop app (Electron).** The window is now drawn by Chromium on the GPU, with the same Python engine
+  behind it. Everything works as before, smoother: the waveforms and timelines redraw at 60 fps, the song list draws
+  only the rows on screen (fast with tens of thousands of songs), and playback uses Web Audio (sample-accurate
+  position, instant seeking, nothing to install for audio output). Settings, sessions, choices and edits carry over.
+  - Installer (per user, no admin rights) and a portable .exe; the command-line tool is unchanged.
+  - The engine's logic (the player's timing, pins, gaps, Auto-align, the song list) is tested without a window, and
+    the window itself end to end.
+- **Word timing you can edit.** In the Edited timeline every word has a mark at its start: drag it to move the word
+  (it stays between its neighbours, inside its line). Right-click a line → *Time this line's words* (works for any
+  lyrics, word-synced or not) or *Clear my word times on this line*. Shift+click the target button above the needle:
+  the next word starts at the needle. Words move with their line; Use edited writes them.
+- **Mix / 🎤 Vocals** in the player: play only the vocals the GPU aligner isolated (kept for the player as Opus,
+  about 3 MB per song), to hear exactly where lines and words start. Available for songs aligned on the GPU from
+  now on; *Clear cached data* removes them.
+
 ## 1.10.0
 - **Word-synced lyrics.** *Synced lyrics: To the line / ⚡ To the word* on the Find lyrics tab. To the
   word writes enhanced LRC: every word gets its own time.
